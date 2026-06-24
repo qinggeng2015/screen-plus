@@ -4,8 +4,7 @@
   --keyboard-height: 0px;
   --page-bg: #06080a;
   --text-main: #d7e1df;
-  --terminal-band: radial-gradient(circle at 20% 0%, rgba(78, 201, 176, 0.12), transparent 32%),
-    linear-gradient(180deg, #07100f 0%, #06080a 42%, #040506 100%);
+  --terminal-band: #06080a;
   --grid-line-a: rgba(255, 255, 255, 0.022);
   --grid-line-b: rgba(255, 255, 255, 0.018);
   --chip-bg: rgba(8, 18, 17, 0.76);
@@ -57,8 +56,7 @@ button {
   color-scheme: light;
   --page-bg: #f7faf8;
   --text-main: #17211f;
-  --terminal-band: radial-gradient(circle at 20% 0%, rgba(44, 166, 143, 0.12), transparent 34%),
-    linear-gradient(180deg, #f9fcfa 0%, #eef4f2 50%, #e6eeeb 100%);
+  --terminal-band: #ffffff;
   --grid-line-a: rgba(31, 48, 45, 0.05);
   --grid-line-b: rgba(31, 48, 45, 0.04);
   --chip-bg: rgba(255, 255, 255, 0.74);
@@ -92,27 +90,15 @@ button {
   transition: inset 180ms ease;
 }
 
-.terminal-frame::before {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  content: "";
-  background:
-    linear-gradient(var(--grid-line-a) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid-line-b) 1px, transparent 1px);
-  background-size: 100% 24px, 24px 100%;
-  opacity: 0.42;
-}
-
 .terminal-host {
   position: absolute;
-  inset: max(12px, env(safe-area-inset-top)) 10px 10px 10px;
+  inset: 0;
   overflow: hidden;
 }
 
 .terminal-host .xterm {
   height: 100%;
-  padding: 8px 4px 4px;
+  padding: 0;
 }
 
 .session-chip {
@@ -550,14 +536,6 @@ button {
 }
 
 @media (max-width: 720px) {
-  .terminal-host {
-    inset: max(8px, env(safe-area-inset-top)) 6px 6px;
-  }
-
-  .terminal-host .xterm {
-    padding-top: 8px;
-  }
-
   .app-shell[data-keyboard-open="true"] {
     --keyboard-height: 118px;
   }

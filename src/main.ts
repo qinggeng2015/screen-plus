@@ -153,7 +153,7 @@ const terminalThemes = {
     brightWhite: '#ffffff'
   },
   light: {
-    background: '#f7faf8',
+    background: '#ffffff',
     foreground: '#17211f',
     cursor: '#0f1a18',
     selectionBackground: '#b7ddd4',
