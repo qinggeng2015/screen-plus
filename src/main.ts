@@ -1,0 +1,843 @@
+import { FitAddon } from '@xterm/addon-fit';
+import { Terminal } from '@xterm/xterm';
+import '@xterm/xterm/css/xterm.css';
+import './styles.css';
+
+type ScreenSession = {
+  id: string;
+  name: string;
+  status: 'attached' | 'detached' | 'multi' | 'dead' | 'unknown';
+  attached: boolean;
+  lastSeen: string | null;
+  managed: boolean;
+};
+
+type SessionResponse = {
+  session: ScreenSession;
+};
+
+type SessionsResponse = {
+  sessions: ScreenSession[];
+  lastSessionId: string | null;
+};
+
+type AuthStatusResponse = {
+  authenticated: boolean;
+  setupRequired: boolean;
+  username: string | null;
+};
+
+type ThemeMode = 'dark' | 'light';
+
+const app = document.querySelector<HTMLDivElement>('#app');
+if (!app) throw new Error('Missing app element');
+
+app.innerHTML = `
+  <main class="app-shell" data-menu-open="false" data-drawer-open="false" data-keyboard-open="false" data-theme="dark">
+    <section class="terminal-frame" aria-label="远程终端">
+      <div class="session-chip" id="sessionChip">正在连接...</div>
+      <div class="terminal-host" id="terminalHost"></div>
+    </section>
+
+    <section class="auth-gate" id="authGate" data-visible="true" aria-label="访问认证">
+      <form class="auth-panel" id="authForm">
+        <h1 id="authTitle">登录</h1>
+        <label class="auth-field">
+          <span>用户名</span>
+          <input id="authUsername" name="username" autocomplete="username" />
+        </label>
+        <label class="auth-field">
+          <span>密码</span>
+          <input id="authPassword" name="password" type="password" autocomplete="current-password" />
+        </label>
+        <button class="primary-action auth-submit" id="authSubmit" type="submit">进入</button>
+        <p class="auth-message" id="authMessage"></p>
+      </form>
+    </section>
+
+    <div class="scrim" id="scrim"></div>
+
+    <aside class="session-drawer" id="sessionDrawer" aria-label="screen 会话列表">
+      <header class="drawer-header">
+        <div>
+          <p>Screen 会话</p>
+          <span id="drawerMeta">正在读取</span>
+        </div>
+        <button class="icon-button" id="closeDrawer" type="button" aria-label="关闭会话列表">×</button>
+      </header>
+      <div class="drawer-actions">
+        <button class="primary-action" id="newSession" type="button">新建会话</button>
+        <button class="ghost-action" id="refreshSessions" type="button">刷新</button>
+      </div>
+      <div class="session-list" id="sessionList"></div>
+    </aside>
+
+    <nav class="quick-menu" id="quickMenu" aria-label="快速操作">
+      <button class="quick-action" id="openSessions" type="button">
+        <span class="quick-action-icon">☰</span>
+        <span>会话</span>
+      </button>
+      <button class="quick-action" id="toggleKeyboard" type="button">
+        <span class="quick-action-icon">⌨</span>
+        <span>键盘</span>
+      </button>
+      <button class="quick-action" id="toggleTheme" type="button" aria-pressed="false">
+        <span class="quick-action-icon" id="themeIcon">☀</span>
+        <span id="themeLabel">白天</span>
+      </button>
+    </nav>
+
+    <button class="fab" id="fab" type="button" aria-label="打开快速操作" aria-expanded="false">
+      <span></span>
+      <span></span>
+      <span></span>
+    </button>
+
+    <section class="terminal-keyboard" id="terminalKeyboard" aria-label="终端快捷键盘">
+      <button data-key="escape" type="button">esc</button>
+      <button data-key="dash" type="button">-</button>
+      <button data-key="home" type="button">Home</button>
+      <button data-key="up" type="button" aria-label="上">↑</button>
+      <button data-key="down" type="button" aria-label="下">↓</button>
+      <button data-key="left" type="button" aria-label="左">←</button>
+      <button data-key="right" type="button" aria-label="右">→</button>
+      <button data-key="tab" type="button">tab</button>
+      <button data-key="ctrl" type="button" aria-pressed="false">ctrl</button>
+      <button data-key="alt" type="button" aria-pressed="false">alt</button>
+    </section>
+  </main>
+`;
+
+const shell = document.querySelector<HTMLElement>('.app-shell')!;
+const terminalHost = document.querySelector<HTMLDivElement>('#terminalHost')!;
+const sessionChip = document.querySelector<HTMLDivElement>('#sessionChip')!;
+const sessionDrawer = document.querySelector<HTMLElement>('#sessionDrawer')!;
+const sessionList = document.querySelector<HTMLDivElement>('#sessionList')!;
+const drawerMeta = document.querySelector<HTMLSpanElement>('#drawerMeta')!;
+const fab = document.querySelector<HTMLButtonElement>('#fab')!;
+const quickMenu = document.querySelector<HTMLElement>('#quickMenu')!;
+const keyboard = document.querySelector<HTMLElement>('#terminalKeyboard')!;
+const scrim = document.querySelector<HTMLElement>('#scrim')!;
+const themeIcon = document.querySelector<HTMLSpanElement>('#themeIcon')!;
+const themeLabel = document.querySelector<HTMLSpanElement>('#themeLabel')!;
+const themeToggle = document.querySelector<HTMLButtonElement>('#toggleTheme')!;
+const authGate = document.querySelector<HTMLElement>('#authGate')!;
+const authForm = document.querySelector<HTMLFormElement>('#authForm')!;
+const authTitle = document.querySelector<HTMLHeadingElement>('#authTitle')!;
+const authUsername = document.querySelector<HTMLInputElement>('#authUsername')!;
+const authPassword = document.querySelector<HTMLInputElement>('#authPassword')!;
+const authSubmit = document.querySelector<HTMLButtonElement>('#authSubmit')!;
+const authMessage = document.querySelector<HTMLParagraphElement>('#authMessage')!;
+
+const terminalThemes = {
+  dark: {
+    background: '#06080a',
+    foreground: '#d7e1df',
+    cursor: '#f0f7f4',
+    selectionBackground: '#2b6158',
+    black: '#07100f',
+    red: '#d65d63',
+    green: '#73c991',
+    yellow: '#d7ba7d',
+    blue: '#6ca8dc',
+    magenta: '#c586c0',
+    cyan: '#4ec9b0',
+    white: '#d4d4d4',
+    brightBlack: '#5a6664',
+    brightRed: '#f48771',
+    brightGreen: '#89d185',
+    brightYellow: '#ffd866',
+    brightBlue: '#82aaff',
+    brightMagenta: '#d670d6',
+    brightCyan: '#64d9c4',
+    brightWhite: '#ffffff'
+  },
+  light: {
+    background: '#f7faf8',
+    foreground: '#17211f',
+    cursor: '#0f1a18',
+    selectionBackground: '#b7ddd4',
+    black: '#17211f',
+    red: '#b93d45',
+    green: '#227a4f',
+    yellow: '#9a6a00',
+    blue: '#2266a8',
+    magenta: '#9a4b99',
+    cyan: '#147d73',
+    white: '#e9efed',
+    brightBlack: '#66736f',
+    brightRed: '#d2525b',
+    brightGreen: '#2f965f',
+    brightYellow: '#bd8100',
+    brightBlue: '#2f7fcf',
+    brightMagenta: '#b05caf',
+    brightCyan: '#15968a',
+    brightWhite: '#ffffff'
+  }
+} as const;
+
+const terminal = new Terminal({
+  cursorBlink: true,
+  convertEol: true,
+  fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
+  fontSize: 14,
+  lineHeight: 1.18,
+  scrollback: 10000,
+  scrollSensitivity: 1,
+  theme: terminalThemes.dark
+});
+
+const fitAddon = new FitAddon();
+terminal.loadAddon(fitAddon);
+terminal.open(terminalHost);
+terminal.attachCustomWheelEventHandler((event) => {
+  event.preventDefault();
+  event.stopPropagation();
+
+  const direction = event.deltaY > 0 ? 1 : -1;
+  const magnitude = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+    ? Math.abs(event.deltaY)
+    : Math.max(1, Math.ceil(Math.abs(event.deltaY) / 40));
+  terminal.scrollLines(direction * Math.min(24, magnitude));
+
+  return false;
+});
+
+const fabPositionStorageKey = 'screen-plus:floating-button-position';
+const themeStorageKey = 'screen-plus:theme';
+const fabSize = 58;
+const fabGap = 18;
+let socket: WebSocket | null = null;
+let activeSession: ScreenSession | null = null;
+let sessions: ScreenSession[] = [];
+let ctrlActive = false;
+let altActive = false;
+let reconnecting = false;
+let sessionRefreshTimer = 0;
+let authMode: 'setup' | 'login' = 'login';
+let terminalStarted = false;
+let isDraggingFab = false;
+let fabDragMoved = false;
+let fabPointerId: number | null = null;
+let fabDragOffset = { x: 0, y: 0 };
+
+function readStoredTheme(): ThemeMode {
+  const saved = localStorage.getItem(themeStorageKey);
+  if (saved === 'light' || saved === 'dark') return saved;
+
+  return 'dark';
+}
+
+function applyTheme(mode: ThemeMode, persist = true) {
+  shell.dataset.theme = mode;
+  terminal.options.theme = terminalThemes[mode];
+  themeToggle.setAttribute('aria-pressed', String(mode === 'light'));
+  themeIcon.textContent = mode === 'light' ? '☾' : '☀';
+  themeLabel.textContent = mode === 'light' ? '暗夜' : '白天';
+
+  if (persist) {
+    localStorage.setItem(themeStorageKey, mode);
+  }
+}
+
+function fitTerminal() {
+  requestAnimationFrame(() => {
+    fitAddon.fit();
+    sendResize();
+  });
+}
+
+function sendResize() {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({
+    type: 'resize',
+    cols: terminal.cols,
+    rows: terminal.rows
+  }));
+}
+
+async function api<T>(url: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    ...options
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: response.statusText }));
+    if (response.status === 401 && !url.startsWith('/api/auth/')) {
+      requireLogin(body.error || response.statusText, Boolean(body.setupRequired));
+    }
+    throw new Error(body.error || response.statusText);
+  }
+
+  return response.json();
+}
+
+function renderAuthGate(status: AuthStatusResponse) {
+  authMode = status.setupRequired ? 'setup' : 'login';
+  authGate.dataset.visible = status.authenticated ? 'false' : 'true';
+  authTitle.textContent = status.setupRequired ? '设置访问密码' : '登录';
+  authSubmit.textContent = status.setupRequired ? '保存并进入' : '进入';
+  authPassword.autocomplete = status.setupRequired ? 'new-password' : 'current-password';
+  authPassword.value = '';
+  authMessage.textContent = '';
+  authUsername.value = status.username || authUsername.value || 'admin';
+
+  if (!status.authenticated) {
+    updateSessionChip(status.setupRequired ? '需要设置密码' : '需要登录');
+    requestAnimationFrame(() => authPassword.focus());
+  }
+}
+
+function startTerminalSession() {
+  if (terminalStarted) return;
+
+  terminalStarted = true;
+  fitTerminal();
+  openDefaultSession();
+}
+
+async function loadAuthStatus() {
+  const status = await api<AuthStatusResponse>('/api/auth/status');
+  renderAuthGate(status);
+  if (status.authenticated) startTerminalSession();
+}
+
+async function submitAuth() {
+  const username = authUsername.value.trim();
+  const password = authPassword.value;
+  const url = authMode === 'setup' ? '/api/auth/setup' : '/api/auth/login';
+
+  authSubmit.disabled = true;
+  authMessage.textContent = authMode === 'setup' ? '正在保存' : '正在登录';
+
+  try {
+    const status = await api<AuthStatusResponse>(url, {
+      method: 'POST',
+      body: JSON.stringify({ username, password })
+    });
+    renderAuthGate(status);
+    startTerminalSession();
+  } catch (error) {
+    authMessage.textContent = error instanceof Error ? error.message : '认证失败';
+    authPassword.select();
+  } finally {
+    authSubmit.disabled = false;
+  }
+}
+
+function requireLogin(message = '需要重新登录', setupRequired = false) {
+  terminalStarted = false;
+  if (socket) {
+    socket.onclose = null;
+    socket.close();
+    socket = null;
+  }
+  activeSession = null;
+  renderAuthGate({
+    authenticated: false,
+    setupRequired,
+    username: authUsername.value || null
+  });
+  authMessage.textContent = message;
+  terminal.clear();
+}
+
+function setMenuOpen(open: boolean) {
+  shell.dataset.menuOpen = String(open);
+  fab.setAttribute('aria-expanded', String(open));
+}
+
+function setDrawerOpen(open: boolean) {
+  shell.dataset.drawerOpen = String(open);
+  if (open) refreshSessions();
+}
+
+function setKeyboardOpen(open: boolean) {
+  shell.dataset.keyboardOpen = String(open);
+  constrainFabPosition();
+  fitTerminal();
+}
+
+function updateModifierButtons() {
+  keyboard.querySelector<HTMLButtonElement>('[data-key="ctrl"]')?.setAttribute('aria-pressed', String(ctrlActive));
+  keyboard.querySelector<HTMLButtonElement>('[data-key="alt"]')?.setAttribute('aria-pressed', String(altActive));
+}
+
+function applyModifiers(data: string) {
+  let next = data;
+
+  if (ctrlActive && data.length === 1) {
+    const lower = data.toLowerCase();
+    if (lower >= 'a' && lower <= 'z') next = String.fromCharCode(lower.charCodeAt(0) - 96);
+    if (data === ' ') next = '\x00';
+    if (data === '[') next = '\x1b';
+    if (data === '\\') next = '\x1c';
+    if (data === ']') next = '\x1d';
+    if (data === '^') next = '\x1e';
+    if (data === '_') next = '\x1f';
+  }
+
+  if (altActive) next = `\x1b${next}`;
+  return next;
+}
+
+function sendInput(data: string) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({ type: 'input', data: applyModifiers(data) }));
+  terminal.focus();
+}
+
+function updateSessionChip(message?: string) {
+  if (message) {
+    sessionChip.textContent = message;
+    return;
+  }
+
+  if (!activeSession) {
+    sessionChip.textContent = '未连接';
+    return;
+  }
+
+  sessionChip.textContent = activeSession.name;
+}
+
+function renderSessions() {
+  drawerMeta.textContent = sessions.length ? `${sessions.length} 个会话` : '暂无会话';
+
+  if (!sessions.length) {
+    sessionList.innerHTML = '<div class="empty-state">没有找到 screen 会话</div>';
+    return;
+  }
+
+  sessionList.replaceChildren(...sessions.map((session) => {
+    const item = document.createElement('article');
+    item.className = 'session-item';
+    item.dataset.active = String(activeSession?.id === session.id);
+
+    const title = document.createElement('button');
+    title.type = 'button';
+    title.className = 'session-main';
+    title.innerHTML = `
+      <span class="session-name">${session.name}</span>
+      <span class="session-id">${session.id}</span>
+    `;
+    title.addEventListener('click', () => {
+      connectSession(session, session.attached);
+      setDrawerOpen(false);
+    });
+
+    const badge = document.createElement('span');
+    badge.className = `session-badge session-badge-${session.status}`;
+    badge.textContent = session.attached ? '占用' : session.status === 'dead' ? '失效' : '空闲';
+
+    const renameButton = document.createElement('button');
+    renameButton.type = 'button';
+    renameButton.className = 'session-tool session-rename';
+    renameButton.setAttribute('aria-label', `重命名会话 ${session.name}`);
+    renameButton.textContent = '✎';
+    renameButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      renameSession(session);
+    });
+
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'session-tool session-close';
+    closeButton.setAttribute('aria-label', `关闭会话 ${session.name}`);
+    closeButton.textContent = '×';
+    closeButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      closeSession(session);
+    });
+
+    item.append(title, badge, renameButton, closeButton);
+    return item;
+  }));
+}
+
+async function refreshSessions() {
+  try {
+    const response = await api<SessionsResponse>('/api/sessions');
+    sessions = response.sessions;
+    const freshActive = activeSession ? sessions.find((session) => session.id === activeSession?.id) : null;
+    if (freshActive) activeSession = freshActive;
+    renderSessions();
+    updateSessionChip();
+  } catch (error) {
+    drawerMeta.textContent = error instanceof Error ? error.message : '读取失败';
+  }
+}
+
+async function reloadSessions() {
+  const response = await api<SessionsResponse>('/api/sessions');
+  sessions = response.sessions;
+  const freshActive = activeSession ? sessions.find((session) => session.id === activeSession?.id) : null;
+  if (freshActive) activeSession = freshActive;
+  renderSessions();
+  updateSessionChip();
+  return response;
+}
+
+function selectFallbackSession(closedSessionId: string, previousSessions = sessions) {
+  const closedIndex = previousSessions.findIndex((session) => session.id === closedSessionId);
+  const orderedCandidates = closedIndex >= 0
+    ? [...previousSessions.slice(closedIndex + 1), ...previousSessions.slice(0, closedIndex)]
+    : previousSessions;
+  const freshById = new Map(sessions.map((session) => [session.id, session]));
+  const candidates = orderedCandidates
+    .map((session) => freshById.get(session.id))
+    .filter((session): session is ScreenSession => Boolean(session) && session.id !== closedSessionId && session.status !== 'dead');
+
+  return candidates.find((session) => !session.attached)
+    || candidates[0]
+    || null;
+}
+
+function websocketUrl(session: ScreenSession, force: boolean) {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const params = new URLSearchParams({
+    session: session.id,
+    force: force ? '1' : '0',
+    cols: String(terminal.cols || 120),
+    rows: String(terminal.rows || 32)
+  });
+  return `${protocol}//${window.location.host}/term?${params.toString()}`;
+}
+
+function connectSession(session: ScreenSession, force = false) {
+  activeSession = session;
+  reconnecting = true;
+  updateSessionChip(force && session.attached ? `正在接管 ${session.name}` : `正在打开 ${session.name}`);
+  renderSessions();
+
+  if (socket) {
+    socket.onclose = null;
+    socket.close();
+    socket = null;
+  }
+
+  terminal.clear();
+  fitTerminal();
+
+  socket = new WebSocket(websocketUrl(session, force));
+
+  socket.addEventListener('open', () => {
+    reconnecting = false;
+    updateSessionChip();
+    sendResize();
+    terminal.focus();
+    refreshSessions();
+  });
+
+  socket.addEventListener('message', (event) => {
+    if (typeof event.data === 'string') {
+      terminal.write(event.data);
+      return;
+    }
+
+    event.data.arrayBuffer().then((buffer: ArrayBuffer) => {
+      terminal.write(new Uint8Array(buffer));
+    });
+  });
+
+  socket.addEventListener('close', () => {
+    if (reconnecting) return;
+    updateSessionChip('连接已断开');
+    refreshSessions();
+  });
+
+  socket.addEventListener('error', () => {
+    updateSessionChip('连接失败');
+  });
+}
+
+async function openDefaultSession() {
+  updateSessionChip('正在选择默认会话');
+  try {
+    const { session } = await api<SessionResponse>('/api/sessions/default', { method: 'POST' });
+    activeSession = session;
+    connectSession(session, false);
+    await refreshSessions();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '默认会话创建失败';
+    updateSessionChip(message);
+    terminal.write(`\r\nscreen-plus: ${message}\r\n`);
+  }
+}
+
+async function createNewSession() {
+  try {
+    const { session } = await api<SessionResponse>('/api/sessions', { method: 'POST', body: '{}' });
+    await refreshSessions();
+    connectSession(session, false);
+    setDrawerOpen(false);
+  } catch (error) {
+    drawerMeta.textContent = error instanceof Error ? error.message : '创建失败';
+  }
+}
+
+async function closeSession(session: ScreenSession) {
+  const confirmed = window.confirm(`关闭 screen 会话「${session.name}」？\\n会话中的进程会被终止。`);
+  if (!confirmed) return;
+
+  try {
+    drawerMeta.textContent = `正在关闭 ${session.name}`;
+    const closingActiveSession = activeSession?.id === session.id;
+    const previousSessions = sessions.slice();
+    if (closingActiveSession) {
+      socket?.close();
+      socket = null;
+      activeSession = null;
+      updateSessionChip('正在关闭当前会话');
+    }
+
+    await api<SessionResponse>(`/api/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
+    await reloadSessions();
+
+    if (closingActiveSession) {
+      terminal.clear();
+      const nextSession = selectFallbackSession(session.id, previousSessions);
+      if (nextSession) {
+        connectSession(nextSession, nextSession.attached);
+      } else {
+        await openDefaultSession();
+      }
+    }
+  } catch (error) {
+    drawerMeta.textContent = error instanceof Error ? error.message : '关闭失败';
+    if (!activeSession) updateSessionChip('关闭失败');
+  }
+}
+
+async function renameSession(session: ScreenSession) {
+  const nextName = window.prompt('新的会话名称', session.name)?.trim();
+  if (!nextName || nextName === session.name) return;
+
+  try {
+    drawerMeta.textContent = `正在重命名 ${session.name}`;
+    const { session: renamedSession } = await api<SessionResponse>(`/api/sessions/${encodeURIComponent(session.id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: nextName })
+    });
+
+    if (activeSession?.id === session.id) {
+      activeSession = renamedSession;
+      updateSessionChip();
+    }
+
+    await refreshSessions();
+  } catch (error) {
+    drawerMeta.textContent = error instanceof Error ? error.message : '重命名失败';
+  }
+}
+
+function keyboardReservedHeight() {
+  return shell.dataset.keyboardOpen === 'true' ? keyboard.getBoundingClientRect().height : 0;
+}
+
+function clampFabPosition(left: number, top: number) {
+  const maxLeft = Math.max(fabGap, window.innerWidth - fabSize - fabGap);
+  const maxTop = Math.max(fabGap, window.innerHeight - keyboardReservedHeight() - fabSize - fabGap);
+
+  return {
+    left: Math.min(Math.max(fabGap, left), maxLeft),
+    top: Math.min(Math.max(fabGap, top), maxTop)
+  };
+}
+
+function applyFabPosition(left: number, top: number, persist = true) {
+  const next = clampFabPosition(left, top);
+  fab.style.left = `${next.left}px`;
+  fab.style.top = `${next.top}px`;
+  fab.style.right = 'auto';
+  fab.style.bottom = 'auto';
+  quickMenu.style.left = `${next.left}px`;
+  quickMenu.style.top = `${next.top}px`;
+  quickMenu.style.right = 'auto';
+  quickMenu.style.bottom = 'auto';
+
+  if (persist) {
+    localStorage.setItem(fabPositionStorageKey, JSON.stringify(next));
+  }
+}
+
+function constrainFabPosition() {
+  const rect = fab.getBoundingClientRect();
+  applyFabPosition(rect.left || window.innerWidth - fabSize - fabGap, rect.top || window.innerHeight - fabSize - fabGap, true);
+}
+
+function restoreFabPosition() {
+  const fallback = {
+    left: window.innerWidth - fabSize - fabGap,
+    top: window.innerHeight - keyboardReservedHeight() - fabSize - fabGap
+  };
+
+  try {
+    const saved = JSON.parse(localStorage.getItem(fabPositionStorageKey) || 'null');
+    if (typeof saved?.left === 'number' && typeof saved?.top === 'number') {
+      applyFabPosition(saved.left, saved.top, false);
+      return;
+    }
+  } catch {
+    localStorage.removeItem(fabPositionStorageKey);
+  }
+
+  applyFabPosition(fallback.left, fallback.top, false);
+}
+
+terminal.onData((data) => sendInput(data));
+terminal.onResize(sendResize);
+
+fab.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) return;
+
+  const rect = fab.getBoundingClientRect();
+  isDraggingFab = true;
+  fabDragMoved = false;
+  fabPointerId = event.pointerId;
+  fabDragOffset = {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top
+  };
+  try {
+    fab.setPointerCapture(event.pointerId);
+  } catch {
+    // Synthetic pointer events in browser tests may not be capturable.
+  }
+  fab.classList.add('fab-dragging');
+});
+
+fab.addEventListener('pointermove', (event) => {
+  if (!isDraggingFab || fabPointerId !== event.pointerId) return;
+
+  const left = event.clientX - fabDragOffset.x;
+  const top = event.clientY - fabDragOffset.y;
+  if (Math.abs(left - fab.getBoundingClientRect().left) > 1 || Math.abs(top - fab.getBoundingClientRect().top) > 1) {
+    fabDragMoved = true;
+  }
+  applyFabPosition(left, top, false);
+});
+
+fab.addEventListener('pointerup', (event) => {
+  if (!isDraggingFab || fabPointerId !== event.pointerId) return;
+
+  isDraggingFab = false;
+  fabPointerId = null;
+  try {
+    fab.releasePointerCapture(event.pointerId);
+  } catch {
+    // Keep drag completion resilient if capture was not established.
+  }
+  fab.classList.remove('fab-dragging');
+  constrainFabPosition();
+
+  if (!fabDragMoved) {
+    setMenuOpen(shell.dataset.menuOpen !== 'true');
+  }
+});
+
+fab.addEventListener('pointercancel', (event) => {
+  if (fabPointerId !== event.pointerId) return;
+
+  isDraggingFab = false;
+  fabPointerId = null;
+  try {
+    fab.releasePointerCapture(event.pointerId);
+  } catch {
+    // Keep drag cancellation resilient if capture was not established.
+  }
+  fab.classList.remove('fab-dragging');
+  constrainFabPosition();
+});
+quickMenu.addEventListener('click', (event) => event.stopPropagation());
+scrim.addEventListener('click', () => {
+  setMenuOpen(false);
+  setDrawerOpen(false);
+});
+
+document.querySelector('#openSessions')?.addEventListener('click', () => {
+  setMenuOpen(false);
+  setDrawerOpen(true);
+});
+
+document.querySelector('#toggleKeyboard')?.addEventListener('click', () => {
+  setMenuOpen(false);
+  setKeyboardOpen(shell.dataset.keyboardOpen !== 'true');
+});
+
+themeToggle.addEventListener('click', () => {
+  const nextMode: ThemeMode = shell.dataset.theme === 'light' ? 'dark' : 'light';
+  setMenuOpen(false);
+  applyTheme(nextMode);
+});
+
+document.querySelector('#closeDrawer')?.addEventListener('click', () => setDrawerOpen(false));
+document.querySelector('#refreshSessions')?.addEventListener('click', refreshSessions);
+document.querySelector('#newSession')?.addEventListener('click', createNewSession);
+
+authForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  submitAuth();
+});
+
+keyboard.addEventListener('click', (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[data-key]');
+  if (!button) return;
+
+  const key = button.dataset.key;
+  const keyMap: Record<string, string> = {
+    escape: '\x1b',
+    dash: '-',
+    home: '\x1b[H',
+    up: '\x1b[A',
+    down: '\x1b[B',
+    right: '\x1b[C',
+    left: '\x1b[D',
+    tab: '\t'
+  };
+
+  if (key === 'ctrl') {
+    ctrlActive = !ctrlActive;
+    updateModifierButtons();
+    terminal.focus();
+    return;
+  }
+
+  if (key === 'alt') {
+    altActive = !altActive;
+    updateModifierButtons();
+    terminal.focus();
+    return;
+  }
+
+  if (key && keyMap[key]) sendInput(keyMap[key]);
+});
+
+window.addEventListener('resize', () => {
+  constrainFabPosition();
+  fitTerminal();
+});
+window.visualViewport?.addEventListener('resize', () => {
+  constrainFabPosition();
+  fitTerminal();
+});
+
+sessionRefreshTimer = window.setInterval(() => {
+  if (shell.dataset.drawerOpen === 'true') refreshSessions();
+}, 5000);
+
+window.addEventListener('beforeunload', () => {
+  window.clearInterval(sessionRefreshTimer);
+  socket?.close();
+});
+
+applyTheme(readStoredTheme(), false);
+restoreFabPosition();
+fitTerminal();
+loadAuthStatus().catch((error) => {
+  authGate.dataset.visible = 'true';
+  authMessage.textContent = error instanceof Error ? error.message : '认证状态读取失败';
+  updateSessionChip('认证状态读取失败');
+});

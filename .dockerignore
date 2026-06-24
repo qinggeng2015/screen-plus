@@ -1,0 +1,9 @@
+node_modules
+dist
+.screen-plus
+.git
+.github
+.DS_Store
+npm-debug.log*
+Dockerfile
+docker-compose.yml

@@ -1,0 +1,14 @@
+services:
+  screen-plus:
+    image: ghcr.io/qinggeng2015/screen-plus:latest
+    build:
+      context: .
+    container_name: screen-plus
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - screen-plus-data:/data
+
+volumes:
+  screen-plus-data:
