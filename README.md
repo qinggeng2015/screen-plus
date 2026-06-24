@@ -38,6 +38,8 @@ http://127.0.0.1:3000
 
 `docker-compose.yml` 会把 `/data` 挂载到命名卷 `screen-plus-data`，认证配置默认保存到 `/data/config.json`。只要这个卷不删除，设置完密码后重启或重建容器都不会二次设置。
 
+Docker 镜像内默认安装并使用 `zsh`，同时安装了 `zsh-autosuggestions` 和 `zsh-syntax-highlighting`。容器内 zsh 配置位于 `/data/zsh/.zshrc`，历史记录位于 `/data/zsh/.zsh_history`，都会随 `screen-plus-data` 卷持久化。
+
 也可以使用已发布镜像：
 
 ```bash
@@ -59,6 +61,9 @@ docker run -d \
 - `SCREEN_PLUS_STATE_DIR`: 最近使用会话状态目录，默认项目内 `.screen-plus`
 - `SCREEN_PLUS_CONFIG`: 认证配置文件路径，默认 `.screen-plus/config.json`，Docker 中默认 `/data/config.json`
 - `SCREEN_PLUS_LOCALE`: 终端 UTF-8 locale，默认跟随环境变量，容器中默认 `C.UTF-8`
+- `SCREEN_PLUS_SHELL`: screen 会话使用的 shell，Docker 中默认 `/usr/bin/zsh`
+- `SHELL`: screen 会话默认 shell，Docker 中默认 `/usr/bin/zsh`
+- `ZDOTDIR`: zsh 配置目录，Docker 中默认 `/data/zsh`
 
 默认 `screen-plus.screenrc` 配置了自然滚动和 10000 行 scrollback：
 

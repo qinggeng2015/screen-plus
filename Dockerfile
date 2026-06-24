@@ -32,21 +32,28 @@ ENV NODE_ENV=production \
   SCREEN_PLUS_STATE_DIR=/data \
   SCREEN_PLUS_CONFIG=/data/config.json \
   SCREEN_PLUS_SCREENRC=/app/screen-plus.screenrc \
+  SCREEN_PLUS_SHELL=/usr/bin/zsh \
+  SHELL=/usr/bin/zsh \
+  ZDOTDIR=/data/zsh \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends screen tini ca-certificates \
+  && apt-get install -y --no-install-recommends screen tini ca-certificates zsh zsh-autosuggestions zsh-syntax-highlighting \
   && rm -rf /var/lib/apt/lists/* \
-  && mkdir -p /data
+  && mkdir -p /data/zsh
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY server ./server
 COPY screen-plus.screenrc package*.json ./
+COPY docker/zshrc /opt/screen-plus/zshrc
 COPY docker-entrypoint.sh /usr/local/bin/screen-plus-entrypoint
 
 RUN chmod +x /usr/local/bin/screen-plus-entrypoint \
+  && cp /opt/screen-plus/zshrc /data/zsh/.zshrc \
+  && touch /data/zsh/.zsh_history \
+  && chsh -s /usr/bin/zsh node \
   && chown -R node:node /app /data
 
 USER node

@@ -12,6 +12,7 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 const SCREEN_BIN = process.env.SCREEN_BIN || 'screen';
 const SCREEN_RC = process.env.SCREEN_PLUS_SCREENRC || path.join(process.cwd(), 'screen-plus.screenrc');
+const SCREEN_SHELL = process.env.SCREEN_PLUS_SHELL || '';
 const STATE_DIR = process.env.SCREEN_PLUS_STATE_DIR || path.join(process.cwd(), '.screen-plus');
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const CONFIG_FILE = process.env.SCREEN_PLUS_CONFIG
@@ -29,7 +30,9 @@ const app = express();
 app.use(express.json());
 
 function screenArgs(args) {
-  return ['-U', '-c', SCREEN_RC, ...args];
+  const baseArgs = ['-U', '-c', SCREEN_RC];
+  if (SCREEN_SHELL) baseArgs.push('-s', SCREEN_SHELL);
+  return [...baseArgs, ...args];
 }
 
 function execScreen(args) {

@@ -1,0 +1,26 @@
+export HISTFILE="${ZDOTDIR:-$HOME}/.zsh_history"
+export HISTSIZE=50000
+export SAVEHIST=50000
+
+setopt append_history
+setopt extended_history
+setopt hist_ignore_dups
+setopt hist_ignore_space
+setopt inc_append_history
+setopt share_history
+
+autoload -Uz compinit
+compinit
+zstyle ':completion:*' menu select
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
+
+if [ -r /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]; then
+  source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+fi
+
+if [ -r /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]; then
+  source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+fi
+
+bindkey -e
+PROMPT='%F{green}%n@%m%f:%F{blue}%~%f %# '
