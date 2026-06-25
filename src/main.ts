@@ -49,7 +49,9 @@ type TerminalTouchGesture = {
   lastY: number;
   lastTime: number;
   moved: boolean;
+  scrolling: boolean;
   velocity: number;
+  peakVelocity: number;
 };
 
 function normalizeBasePath(value: string | undefined) {
@@ -285,8 +287,8 @@ const fabGap = 18;
 const socketIdleReconnectMs = 90_000;
 const viewportMetricTolerance = 1;
 const terminalTouchScrollGuardMs = 220;
-const terminalTapMoveTolerance = 8;
-const terminalInertiaMinVelocity = 0.035;
+const terminalTapMoveTolerance = 3;
+const terminalInertiaMinVelocity = 0.02;
 const terminalInertiaFrictionMs = 360;
 let socket: WebSocket | null = null;
 let activeSession: ScreenSession | null = null;
@@ -396,6 +398,10 @@ function touchPoint(event: TouchEvent) {
   return event.touches[0] || event.changedTouches[0] || null;
 }
 
+function isTerminalVerticalScroll(deltaX: number, deltaY: number) {
+  return deltaY > terminalTapMoveTolerance && deltaY > deltaX * 1.2;
+}
+
 function terminalLineHeightPx() {
   const rowElement = terminalScreen?.querySelector<HTMLElement>('.xterm-rows > div');
   const measured = rowElement?.getBoundingClientRect().height || 0;
@@ -479,7 +485,9 @@ function handleTerminalTouchStart(event: TouchEvent) {
     lastY: point.clientY,
     lastTime: now,
     moved: false,
-    velocity: 0
+    scrolling: false,
+    velocity: 0,
+    peakVelocity: 0
   };
   setTerminalSubrowOffset(0);
   event.stopImmediatePropagation();
@@ -493,31 +501,55 @@ function handleTerminalTouchMove(event: TouchEvent) {
     const now = performance.now();
     const deltaX = Math.abs(point.clientX - terminalTouchGesture.startX);
     const deltaY = Math.abs(point.clientY - terminalTouchGesture.startY);
-    if (deltaX > terminalTapMoveTolerance || deltaY > terminalTapMoveTolerance) {
+    if (isTerminalVerticalScroll(deltaX, deltaY)) {
       terminalTouchGesture.moved = true;
     }
 
     const movement = terminalTouchGesture.lastY - point.clientY;
+    const startupMovement = terminalTouchGesture.startY - point.clientY;
     const elapsed = Math.max(1, now - terminalTouchGesture.lastTime);
     terminalTouchGesture.velocity = movement / elapsed;
+    if (Math.abs(terminalTouchGesture.velocity) > Math.abs(terminalTouchGesture.peakVelocity)) {
+      terminalTouchGesture.peakVelocity = terminalTouchGesture.velocity;
+    }
     terminalTouchGesture.lastY = point.clientY;
     terminalTouchGesture.lastTime = now;
 
     if (terminalTouchGesture.moved) {
-      applyTerminalTouchDelta(movement);
+      const effectiveMovement = terminalTouchGesture.scrolling ? movement : startupMovement;
+      terminalTouchGesture.scrolling = true;
+      applyTerminalTouchDelta(effectiveMovement);
     }
   }
 
   markTerminalTouchScroll();
-  if (terminalTouchGesture.moved) event.preventDefault();
+  if (terminalTouchGesture.scrolling) event.preventDefault();
   event.stopImmediatePropagation();
 }
 
 function handleTerminalTouchEnd(event: TouchEvent) {
   if (!shouldUseNativeTerminalTouchScroll() || !terminalTouchGesture) return;
 
+  const point = touchPoint(event);
+  if (point && !terminalTouchGesture.scrolling) {
+    const deltaX = Math.abs(point.clientX - terminalTouchGesture.startX);
+    const deltaY = Math.abs(point.clientY - terminalTouchGesture.startY);
+    if (isTerminalVerticalScroll(deltaX, deltaY)) {
+      const now = performance.now();
+      const movement = terminalTouchGesture.startY - point.clientY;
+      const elapsed = Math.max(1, now - terminalTouchGesture.lastTime);
+      terminalTouchGesture.moved = true;
+      terminalTouchGesture.scrolling = true;
+      terminalTouchGesture.velocity = movement / elapsed;
+      terminalTouchGesture.peakVelocity = terminalTouchGesture.velocity;
+      applyTerminalTouchDelta(movement);
+    }
+  }
+
   const shouldFocus = !terminalTouchGesture.moved;
-  const velocity = terminalTouchGesture.velocity;
+  const velocity = Math.abs(terminalTouchGesture.peakVelocity) > Math.abs(terminalTouchGesture.velocity)
+    ? terminalTouchGesture.peakVelocity
+    : terminalTouchGesture.velocity;
   terminalTouchGesture = null;
   schedulePostTouchFit(120);
   if (!shouldFocus && Math.abs(velocity) >= terminalInertiaMinVelocity) {
