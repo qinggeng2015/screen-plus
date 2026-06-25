@@ -394,8 +394,7 @@ function handleTerminalTouchEnd(event: TouchEvent) {
     updateTerminalTouchMovement(touch.clientX, touch.clientY);
   }
 
-  if (terminalTouchTap && !terminalTouchTap.moved) {
-    terminalSuppressMouseFocusUntil = 0;
+  if (terminalTouchTap && !terminalTouchTap.moved && Date.now() > terminalSuppressMouseFocusUntil) {
     terminal.focus();
   }
 
@@ -408,9 +407,7 @@ function handleTerminalTouchCancel() {
 
 function handleTerminalGestureChange(event: Event) {
   const gesture = event as Event & { translationX?: number; translationY?: number };
-  const deltaX = Math.abs(gesture.translationX || 0);
-  const deltaY = Math.abs(gesture.translationY || 0);
-  if (deltaX > terminalTapMoveTolerance || deltaY > terminalTapMoveTolerance) {
+  if (Math.abs(gesture.translationX || 0) > 0 || Math.abs(gesture.translationY || 0) > 0) {
     markTerminalTouchMoved();
   }
 }
