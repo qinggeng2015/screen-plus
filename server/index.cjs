@@ -8,6 +8,14 @@ const express = require('express');
 const pty = require('node-pty');
 const { WebSocketServer } = require('ws');
 
+function normalizeBasePath(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed || trimmed === '/') return '';
+
+  const normalized = trimmed.split('/').filter(Boolean).join('/');
+  return normalized ? `/${normalized}` : '';
+}
+
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 const SCREEN_BIN = process.env.SCREEN_BIN || 'screen';
@@ -20,6 +28,8 @@ const CONFIG_FILE = process.env.SCREEN_PLUS_CONFIG
   : path.join(STATE_DIR, 'config.json');
 const SESSION_PREFIX = process.env.SCREEN_PLUS_PREFIX || 'sp';
 const STATIC_DIR = path.join(process.cwd(), 'dist');
+const INDEX_HTML = path.join(STATIC_DIR, 'index.html');
+const BASE_PATH = normalizeBasePath(process.env.SCREEN_PLUS_BASE_PATH);
 const AUTH_COOKIE = 'screen_plus_session';
 const AUTH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PASSWORD_KEY_LENGTH = 64;
@@ -28,7 +38,133 @@ const UTF8_LOCALE = process.env.SCREEN_PLUS_LOCALE
 const SHELL_HOME = process.env.SCREEN_PLUS_HOME || process.env.HOME || os.homedir() || process.cwd();
 
 const app = express();
+app.use(stripBasePath);
 app.use(express.json());
+
+function parseRequestUrl(value) {
+  return new URL(value || '/', 'http://screen-plus.local');
+}
+
+function replaceRequestPath(value, pathname) {
+  const url = parseRequestUrl(value);
+  return `${pathname}${url.search}`;
+}
+
+function forwardedBasePath(req) {
+  const header = req.headers['x-forwarded-prefix'];
+  const value = Array.isArray(header) ? header[0] : String(header || '').split(',')[0];
+  return normalizeBasePath(value);
+}
+
+function inferredServicePath(pathname) {
+  for (const segment of ['api', 'assets', 'term']) {
+    const rootPath = `/${segment}`;
+    if (pathname === rootPath || pathname.startsWith(`${rootPath}/`)) {
+      return { basePath: '', pathname };
+    }
+
+    const marker = `/${segment}`;
+    const index = pathname.indexOf(marker);
+    if (index <= 0) continue;
+
+    const nextChar = pathname[index + marker.length];
+    if (nextChar && nextChar !== '/') continue;
+
+    return {
+      basePath: normalizeBasePath(pathname.slice(0, index)),
+      pathname: pathname.slice(index) || '/'
+    };
+  }
+
+  return null;
+}
+
+function inferredPageBasePath(pathname) {
+  if (!pathname || pathname === '/') return '';
+
+  const cleanPath = pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
+  const lastSegment = cleanPath.split('/').pop() || '';
+  if (lastSegment.includes('.')) {
+    return normalizeBasePath(cleanPath.slice(0, -(lastSegment.length + 1)));
+  }
+
+  return normalizeBasePath(cleanPath);
+}
+
+function acceptsHtml(req) {
+  const accept = String(req.headers.accept || '');
+  return !accept || accept.includes('text/html') || accept.includes('*/*');
+}
+
+function shouldRedirectToDirectory(req, pathname) {
+  if (!pathname || pathname === '/' || pathname.endsWith('/')) return false;
+  if (inferredServicePath(pathname)) return false;
+  if ((pathname.split('/').pop() || '').includes('.')) return false;
+  return acceptsHtml(req);
+}
+
+function requestBasePath(req) {
+  return BASE_PATH || forwardedBasePath(req) || normalizeBasePath(req.screenPlusBasePath);
+}
+
+function stripBasePath(req, res, next) {
+  const url = parseRequestUrl(req.url);
+
+  if (!BASE_PATH) {
+    const inferred = inferredServicePath(url.pathname);
+    if (inferred) {
+      req.screenPlusBasePath = inferred.basePath;
+      req.url = replaceRequestPath(req.url, inferred.pathname);
+      next();
+      return;
+    }
+
+    if (shouldRedirectToDirectory(req, url.pathname)) {
+      res.redirect(308, `${url.pathname}/${url.search}`);
+      return;
+    }
+
+    req.screenPlusBasePath = forwardedBasePath(req) || inferredPageBasePath(url.pathname);
+    next();
+    return;
+  }
+
+  req.screenPlusBasePath = BASE_PATH;
+
+  if (url.pathname === BASE_PATH) {
+    const query = url.search || '';
+    res.redirect(308, `${BASE_PATH}/${query}`);
+    return;
+  }
+
+  if (url.pathname.startsWith(`${BASE_PATH}/`)) {
+    const nextPathname = url.pathname.slice(BASE_PATH.length) || '/';
+    req.url = replaceRequestPath(req.url, nextPathname);
+  }
+
+  next();
+}
+
+function stripBasePathname(pathname) {
+  if (!BASE_PATH) {
+    return inferredServicePath(pathname)?.pathname || pathname;
+  }
+
+  if (pathname === BASE_PATH) return '/';
+  if (pathname.startsWith(`${BASE_PATH}/`)) return pathname.slice(BASE_PATH.length) || '/';
+  return pathname;
+}
+
+function renderIndexHtml(req) {
+  const html = fs.readFileSync(INDEX_HTML, 'utf8');
+  const runtimeConfig = `<script>window.__SCREEN_PLUS_BASE_PATH__=${JSON.stringify(requestBasePath(req))};</script>`;
+
+  if (html.includes('</head>')) {
+    return html.replace('</head>', `    ${runtimeConfig}\n  </head>`);
+  }
+
+  return `${runtimeConfig}\n${html}`;
+}
 
 function screenArgs(args) {
   const baseArgs = ['-U', '-c', SCREEN_RC];
@@ -259,7 +395,7 @@ function authCookieAttributes(req, maxAgeSeconds) {
   return [
     'HttpOnly',
     'SameSite=Lax',
-    'Path=/',
+    `Path=${requestBasePath(req) || '/'}`,
     `Max-Age=${maxAgeSeconds}`,
     secure ? 'Secure' : null
   ].filter(Boolean).join('; ');
@@ -587,9 +723,9 @@ app.delete('/api/sessions/:id', async (req, res, next) => {
 });
 
 if (fs.existsSync(STATIC_DIR)) {
-  app.use(express.static(STATIC_DIR));
-  app.get('*', (_req, res) => {
-    res.sendFile(path.join(STATIC_DIR, 'index.html'));
+  app.use(express.static(STATIC_DIR, { index: false }));
+  app.get('*', (req, res) => {
+    res.type('html').send(renderIndexHtml(req));
   });
 } else {
   app.get('*', (_req, res) => {
@@ -610,7 +746,7 @@ const wss = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', (request, socket, head) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
-  if (url.pathname !== '/term') {
+  if (stripBasePathname(url.pathname) !== '/term') {
     socket.destroy();
     return;
   }
@@ -629,8 +765,7 @@ server.on('upgrade', (request, socket, head) => {
 wss.on('connection', async (ws, _request, url) => {
   const requestedSession = url.searchParams.get('session');
   const force = url.searchParams.get('force') === '1';
-  const cols = Math.max(20, Math.min(300, Number(url.searchParams.get('cols')) || 120));
-  const rows = Math.max(6, Math.min(120, Number(url.searchParams.get('rows')) || 32));
+  const { cols, rows } = normalizeTerminalSize(url.searchParams.get('cols'), url.searchParams.get('rows'));
 
   if (!requestedSession) {
     ws.send('\r\nscreen-plus: missing session id\r\n');
@@ -649,6 +784,7 @@ wss.on('connection', async (ws, _request, url) => {
       return;
     }
 
+    await resizeSessionWindow(session.id, cols, rows);
     const args = screenArgs(force ? ['-A', '-D', '-r', session.id] : ['-A', '-r', session.id]);
     rememberSession(session.id);
 
@@ -683,9 +819,9 @@ wss.on('connection', async (ws, _request, url) => {
         term.write(payload.data);
       }
       if (payload.type === 'resize') {
-        const nextCols = Math.max(20, Math.min(300, Number(payload.cols) || cols));
-        const nextRows = Math.max(6, Math.min(120, Number(payload.rows) || rows));
+        const { cols: nextCols, rows: nextRows } = normalizeTerminalSize(payload.cols, payload.rows);
         term.resize(nextCols, nextRows);
+        resizeSessionWindow(requestedSession, nextCols, nextRows).catch(() => {});
       }
     } catch {
       term.write(message.toString());

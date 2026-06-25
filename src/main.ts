@@ -3,6 +3,14 @@ import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 
+declare global {
+  interface Window {
+    __SCREEN_PLUS_BASE_PATH__?: string;
+  }
+}
+
+declare const __SCREEN_PLUS_DEV_BASE_PATH__: string;
+
 type ScreenSession = {
   id: string;
   name: string;
@@ -28,6 +36,39 @@ type AuthStatusResponse = {
 };
 
 type ThemeMode = 'dark' | 'light';
+
+function normalizeBasePath(value: string | undefined) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed || trimmed === '/') return '';
+
+  const normalized = trimmed.split('/').filter(Boolean).join('/');
+  return normalized ? `/${normalized}` : '';
+}
+
+function inferBasePathFromLocation() {
+  const pathname = window.location.pathname;
+  if (!pathname || pathname === '/') return '';
+
+  const cleanPath = pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
+  const lastSegment = cleanPath.split('/').pop() || '';
+  if (lastSegment.includes('.')) {
+    return normalizeBasePath(cleanPath.slice(0, -(lastSegment.length + 1)));
+  }
+
+  return normalizeBasePath(cleanPath);
+}
+
+const runtimeBasePath = Object.prototype.hasOwnProperty.call(window, '__SCREEN_PLUS_BASE_PATH__')
+  ? window.__SCREEN_PLUS_BASE_PATH__
+  : __SCREEN_PLUS_DEV_BASE_PATH__;
+const appBasePath = normalizeBasePath(runtimeBasePath) || inferBasePathFromLocation();
+
+function withBasePath(path: string) {
+  if (/^[a-z][a-z\d+\-.]*:/i.test(path)) return path;
+
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${appBasePath}${normalizedPath}`;
+}
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing app element');
@@ -287,7 +328,7 @@ function sendResize() {
 }
 
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
+  const response = await fetch(withBasePath(url), {
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     ...options
@@ -540,7 +581,7 @@ function websocketUrl(session: ScreenSession, force: boolean) {
     cols: String(terminal.cols || 120),
     rows: String(terminal.rows || 32)
   });
-  return `${protocol}//${window.location.host}/term?${params.toString()}`;
+  return `${protocol}//${window.location.host}${withBasePath('/term')}?${params.toString()}`;
 }
 
 function ensureActiveConnection(reason = 'resume') {

@@ -22,6 +22,26 @@ npm start
 
 首次访问页面时需要设置用户名和密码。密码会以哈希形式保存到配置文件中，后续重启服务不需要重新设置。
 
+如果需要挂在反向代理的子路径下，例如通过 `/screen/`、`/a/`、`/b/` 访问当前服务，服务会默认从请求路径自动推断前缀。反向代理需要同时转发 HTTP 和 WebSocket。以 Nginx 为例：
+
+```nginx
+location /screen/ {
+  proxy_pass http://127.0.0.1:3000;
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-Prefix /screen;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+}
+```
+
+如果你的代理规则会把路径改写得比较复杂，也可以显式固定前缀：
+
+```bash
+SCREEN_PLUS_BASE_PATH=/screen npm start
+```
+
 ## Docker 运行
 
 直接使用 Docker Compose：
@@ -55,6 +75,7 @@ docker run -d \
 
 - `PORT`: 后端监听端口，默认 `3000`
 - `HOST`: 后端监听地址，默认 `0.0.0.0`
+- `SCREEN_PLUS_BASE_PATH`: 显式指定反向代理子路径，例如 `/screen`；默认空，表示自动推断
 - `SCREEN_BIN`: screen 可执行文件，默认 `screen`
 - `SCREEN_PLUS_SCREENRC`: screen 配置文件路径，默认项目内 `screen-plus.screenrc`
 - `SCREEN_PLUS_PREFIX`: 自动创建会话名前缀，默认 `sp`
