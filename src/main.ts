@@ -238,7 +238,7 @@ const terminalThemes = {
 } as const;
 
 const appThemeColors: Record<ThemeMode, string> = {
-  dark: '#06080a',
+  dark: '#ffffff',
   light: '#ffffff'
 };
 
@@ -311,7 +311,7 @@ function applyTheme(mode: ThemeMode, persist = true) {
   terminal.options.theme = terminalThemes[mode];
   document.documentElement.style.colorScheme = mode;
   themeColorMeta?.setAttribute('content', appThemeColors[mode]);
-  appleStatusBarMeta?.setAttribute('content', mode === 'light' ? 'default' : 'black-translucent');
+  appleStatusBarMeta?.setAttribute('content', 'default');
   themeToggle.setAttribute('aria-pressed', String(mode === 'light'));
   themeIcon.textContent = mode === 'light' ? '☾' : '☀';
   themeLabel.textContent = mode === 'light' ? '暗夜' : '白天';

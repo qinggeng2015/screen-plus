@@ -1,4 +1,4 @@
-const CACHE_NAME = 'screen-plus-shell-v1';
+const CACHE_NAME = 'screen-plus-shell-v2';
 
 self.addEventListener('install', () => {
   self.skipWaiting();
@@ -19,6 +19,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
   if (url.pathname.includes('/api/') || url.pathname.endsWith('/term')) return;
+  if (url.pathname.endsWith('/manifest.json') || url.pathname.endsWith('/manifest.webmanifest')) return;
+  if (url.pathname.endsWith('/service-worker.js')) return;
 
   event.respondWith(
     fetch(request)
