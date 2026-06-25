@@ -244,11 +244,17 @@ function applyTheme(mode: ThemeMode, persist = true) {
   }
 }
 
-function fitTerminal() {
-  requestAnimationFrame(() => {
+function fitTerminalNow() {
+  try {
     fitAddon.fit();
     sendResize();
-  });
+  } catch {
+    // The terminal can briefly be hidden while the auth gate is settling.
+  }
+}
+
+function fitTerminal() {
+  requestAnimationFrame(fitTerminalNow);
 }
 
 function syncViewportSize() {
@@ -565,7 +571,7 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
   }
 
   if (options.clear !== false) terminal.clear();
-  fitTerminal();
+  fitTerminalNow();
 
   socket = new WebSocket(websocketUrl(session, force));
 
@@ -573,7 +579,9 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
     reconnecting = false;
     lastSocketActivityAt = Date.now();
     updateSessionChip();
-    sendResize();
+    fitTerminalNow();
+    window.setTimeout(fitTerminalNow, 120);
+    window.setTimeout(fitTerminalNow, 400);
     terminal.focus();
     refreshSessions();
   });
