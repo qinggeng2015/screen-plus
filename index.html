@@ -11,6 +11,19 @@
     <link rel="manifest" href="./manifest.json" />
     <link rel="icon" href="./icons/icon-192.png" />
     <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+    <script>
+      (() => {
+        try {
+          const theme = localStorage.getItem('screen-plus:theme') === 'light' ? 'light' : 'dark';
+          const color = theme === 'light' ? '#ffffff' : '#06080a';
+          document.documentElement.style.colorScheme = theme;
+          document.querySelector('meta[name="theme-color"]')?.setAttribute('content', color);
+          document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')?.setAttribute('content', theme === 'light' ? 'default' : 'black-translucent');
+        } catch {
+          // Keep startup resilient when storage is unavailable.
+        }
+      })();
+    </script>
     <title>Screen Plus</title>
   </head>
   <body>

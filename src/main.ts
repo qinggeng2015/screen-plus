@@ -180,6 +180,8 @@ const scrim = document.querySelector<HTMLElement>('#scrim')!;
 const themeIcon = document.querySelector<HTMLSpanElement>('#themeIcon')!;
 const themeLabel = document.querySelector<HTMLSpanElement>('#themeLabel')!;
 const themeToggle = document.querySelector<HTMLButtonElement>('#toggleTheme')!;
+const themeColorMeta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+const appleStatusBarMeta = document.querySelector<HTMLMetaElement>('meta[name="apple-mobile-web-app-status-bar-style"]');
 const authGate = document.querySelector<HTMLElement>('#authGate')!;
 const authForm = document.querySelector<HTMLFormElement>('#authForm')!;
 const authTitle = document.querySelector<HTMLHeadingElement>('#authTitle')!;
@@ -234,6 +236,11 @@ const terminalThemes = {
     brightWhite: '#ffffff'
   }
 } as const;
+
+const appThemeColors: Record<ThemeMode, string> = {
+  dark: '#06080a',
+  light: '#ffffff'
+};
 
 const terminal = new Terminal({
   cursorBlink: true,
@@ -301,6 +308,9 @@ function readStoredTheme(): ThemeMode {
 function applyTheme(mode: ThemeMode, persist = true) {
   shell.dataset.theme = mode;
   terminal.options.theme = terminalThemes[mode];
+  document.documentElement.style.colorScheme = mode;
+  themeColorMeta?.setAttribute('content', appThemeColors[mode]);
+  appleStatusBarMeta?.setAttribute('content', mode === 'light' ? 'default' : 'black-translucent');
   themeToggle.setAttribute('aria-pressed', String(mode === 'light'));
   themeIcon.textContent = mode === 'light' ? '☾' : '☀';
   themeLabel.textContent = mode === 'light' ? '暗夜' : '白天';
