@@ -105,3 +105,9 @@ defutf8 on
 ```text
 ghcr.io/qinggeng2015/screen-plus
 ```
+
+## License
+
+Screen Plus is licensed under the GNU General Public License v3.0 or later. See [LICENSE](LICENSE).
+
+This project uses GNU Screen at runtime. GNU Screen is free software licensed under the GNU General Public License, either version 3 or, at your option, any later version. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for details.

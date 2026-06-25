@@ -48,7 +48,7 @@ RUN apt-get update \
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY server ./server
-COPY screen-plus.screenrc package*.json ./
+COPY LICENSE THIRD-PARTY-NOTICES.md screen-plus.screenrc package*.json ./
 COPY docker/zshrc /opt/screen-plus/zshrc
 COPY docker-entrypoint.sh /usr/local/bin/screen-plus-entrypoint
 
