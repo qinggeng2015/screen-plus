@@ -123,16 +123,7 @@ button {
 .terminal-host .xterm-screen {
   contain: paint;
   touch-action: pan-y;
-}
-
-@media (hover: none) and (pointer: coarse) {
-  .terminal-host .xterm-screen {
-    pointer-events: none;
-  }
-
-  .terminal-host .xterm-viewport {
-    pointer-events: auto;
-  }
+  will-change: transform;
 }
 
 .session-chip {

@@ -44,9 +44,12 @@ type ViewportMetrics = {
 };
 
 type TerminalTouchGesture = {
-  x: number;
-  y: number;
+  startX: number;
+  startY: number;
+  lastY: number;
+  lastTime: number;
   moved: boolean;
+  velocity: number;
 };
 
 function normalizeBasePath(value: string | undefined) {
@@ -283,6 +286,8 @@ const socketIdleReconnectMs = 90_000;
 const viewportMetricTolerance = 1;
 const terminalTouchScrollGuardMs = 220;
 const terminalTapMoveTolerance = 8;
+const terminalInertiaMinVelocity = 0.035;
+const terminalInertiaFrictionMs = 360;
 let socket: WebSocket | null = null;
 let activeSession: ScreenSession | null = null;
 let sessions: ScreenSession[] = [];
@@ -306,7 +311,10 @@ let lastViewportMetrics: ViewportMetrics | null = null;
 let terminalTouchScrollUntil = 0;
 let postTouchFitTimer = 0;
 let terminalTouchGesture: TerminalTouchGesture | null = null;
-let terminalViewport: HTMLElement | null = null;
+let terminalScreen: HTMLElement | null = null;
+let terminalElement: HTMLElement | null = null;
+let terminalSubrowOffset = 0;
+let terminalInertiaFrame = 0;
 
 function readStoredTheme(): ThemeMode {
   const saved = localStorage.getItem(themeStorageKey);
@@ -388,18 +396,93 @@ function touchPoint(event: TouchEvent) {
   return event.touches[0] || event.changedTouches[0] || null;
 }
 
+function terminalLineHeightPx() {
+  const rowElement = terminalScreen?.querySelector<HTMLElement>('.xterm-rows > div');
+  const measured = rowElement?.getBoundingClientRect().height || 0;
+  const screenMeasured = terminalScreen ? terminalScreen.getBoundingClientRect().height / Math.max(1, terminal.rows) : 0;
+  return measured || screenMeasured || 16;
+}
+
+function setTerminalSubrowOffset(value: number) {
+  terminalSubrowOffset = value;
+  if (terminalScreen) {
+    terminalScreen.style.transform = value ? `translateY(${-value}px)` : '';
+  }
+}
+
+function clearTerminalInertia() {
+  if (terminalInertiaFrame) {
+    window.cancelAnimationFrame(terminalInertiaFrame);
+    terminalInertiaFrame = 0;
+  }
+}
+
+function applyTerminalTouchDelta(deltaY: number) {
+  const lineHeight = terminalLineHeightPx();
+  let offset = terminalSubrowOffset + deltaY;
+  let lines = 0;
+  const previousViewportY = terminal.buffer.active.viewportY;
+
+  if (Math.abs(offset) >= lineHeight) {
+    lines = Math.trunc(offset / lineHeight);
+    terminal.scrollLines(lines);
+    offset -= lines * lineHeight;
+  }
+
+  const viewportY = terminal.buffer.active.viewportY;
+  const maxViewportY = Math.max(0, terminal.buffer.active.baseY);
+  const hitBoundary = (viewportY <= 0 && offset < 0)
+    || (viewportY >= maxViewportY && offset > 0)
+    || (lines !== 0 && viewportY === previousViewportY);
+  if (hitBoundary) {
+    offset = 0;
+    clearTerminalInertia();
+  }
+
+  setTerminalSubrowOffset(offset);
+}
+
+function startTerminalInertia(velocity: number) {
+  clearTerminalInertia();
+  velocity = Math.max(-2.4, Math.min(2.4, velocity));
+
+  let lastFrameAt = performance.now();
+  const step = (now: number) => {
+    const elapsed = Math.min(32, now - lastFrameAt);
+    lastFrameAt = now;
+    velocity *= Math.exp(-elapsed / terminalInertiaFrictionMs);
+
+    if (Math.abs(velocity) < terminalInertiaMinVelocity) {
+      setTerminalSubrowOffset(0);
+      terminalInertiaFrame = 0;
+      return;
+    }
+
+    applyTerminalTouchDelta(velocity * elapsed);
+    terminalInertiaFrame = window.requestAnimationFrame(step);
+  };
+
+  terminalInertiaFrame = window.requestAnimationFrame(step);
+}
+
 function handleTerminalTouchStart(event: TouchEvent) {
   if (!shouldUseNativeTerminalTouchScroll()) return;
 
   const point = touchPoint(event);
   if (!point) return;
 
+  clearTerminalInertia();
+  const now = performance.now();
   terminalTouchGesture = {
-    x: point.clientX,
-    y: point.clientY,
-    moved: false
+    startX: point.clientX,
+    startY: point.clientY,
+    lastY: point.clientY,
+    lastTime: now,
+    moved: false,
+    velocity: 0
   };
-  event.stopPropagation();
+  setTerminalSubrowOffset(0);
+  event.stopImmediatePropagation();
 }
 
 function handleTerminalTouchMove(event: TouchEvent) {
@@ -407,24 +490,42 @@ function handleTerminalTouchMove(event: TouchEvent) {
 
   const point = touchPoint(event);
   if (point) {
-    const deltaX = Math.abs(point.clientX - terminalTouchGesture.x);
-    const deltaY = Math.abs(point.clientY - terminalTouchGesture.y);
+    const now = performance.now();
+    const deltaX = Math.abs(point.clientX - terminalTouchGesture.startX);
+    const deltaY = Math.abs(point.clientY - terminalTouchGesture.startY);
     if (deltaX > terminalTapMoveTolerance || deltaY > terminalTapMoveTolerance) {
       terminalTouchGesture.moved = true;
+    }
+
+    const movement = terminalTouchGesture.lastY - point.clientY;
+    const elapsed = Math.max(1, now - terminalTouchGesture.lastTime);
+    terminalTouchGesture.velocity = movement / elapsed;
+    terminalTouchGesture.lastY = point.clientY;
+    terminalTouchGesture.lastTime = now;
+
+    if (terminalTouchGesture.moved) {
+      applyTerminalTouchDelta(movement);
     }
   }
 
   markTerminalTouchScroll();
-  event.stopPropagation();
+  if (terminalTouchGesture.moved) event.preventDefault();
+  event.stopImmediatePropagation();
 }
 
 function handleTerminalTouchEnd(event: TouchEvent) {
   if (!shouldUseNativeTerminalTouchScroll() || !terminalTouchGesture) return;
 
   const shouldFocus = !terminalTouchGesture.moved;
+  const velocity = terminalTouchGesture.velocity;
   terminalTouchGesture = null;
   schedulePostTouchFit(120);
-  event.stopPropagation();
+  if (!shouldFocus && Math.abs(velocity) >= terminalInertiaMinVelocity) {
+    startTerminalInertia(velocity);
+  } else {
+    setTerminalSubrowOffset(0);
+  }
+  event.stopImmediatePropagation();
 
   if (shouldFocus) {
     terminal.focus();
@@ -435,18 +536,20 @@ function handleTerminalTouchCancel(event: TouchEvent) {
   if (!shouldUseNativeTerminalTouchScroll()) return;
 
   terminalTouchGesture = null;
+  setTerminalSubrowOffset(0);
   schedulePostTouchFit(120);
-  event.stopPropagation();
+  event.stopImmediatePropagation();
 }
 
 function bindTerminalViewportTouchScroll() {
-  terminalViewport = terminalHost.querySelector<HTMLElement>('.xterm-viewport');
-  if (!terminalViewport) return;
+  terminalElement = terminalHost.querySelector<HTMLElement>('.xterm');
+  terminalScreen = terminalHost.querySelector<HTMLElement>('.xterm-screen');
+  if (!terminalElement) return;
 
-  terminalViewport.addEventListener('touchstart', handleTerminalTouchStart, { passive: true });
-  terminalViewport.addEventListener('touchmove', handleTerminalTouchMove, { passive: true });
-  terminalViewport.addEventListener('touchend', handleTerminalTouchEnd, { passive: true });
-  terminalViewport.addEventListener('touchcancel', handleTerminalTouchCancel, { passive: true });
+  terminalElement.addEventListener('touchstart', handleTerminalTouchStart, { capture: true, passive: true });
+  terminalElement.addEventListener('touchmove', handleTerminalTouchMove, { capture: true, passive: false });
+  terminalElement.addEventListener('touchend', handleTerminalTouchEnd, { capture: true, passive: true });
+  terminalElement.addEventListener('touchcancel', handleTerminalTouchCancel, { capture: true, passive: true });
 }
 
 function resetTerminalView() {
