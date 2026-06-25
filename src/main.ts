@@ -276,6 +276,7 @@ const socketIdleReconnectMs = 90_000;
 const viewportMetricTolerance = 1;
 const terminalTapMoveTolerance = 8;
 const terminalTouchScrollSuppressMouseMs = 500;
+const terminalKeyboardTransitionMs = 180;
 let socket: WebSocket | null = null;
 let activeSession: ScreenSession | null = null;
 let sessions: ScreenSession[] = [];
@@ -333,6 +334,13 @@ function fitTerminalNow() {
 
 function fitTerminal() {
   requestAnimationFrame(fitTerminalNow);
+}
+
+function scheduleTerminalFit() {
+  fitTerminal();
+  window.setTimeout(fitTerminalNow, 80);
+  window.setTimeout(fitTerminalNow, terminalKeyboardTransitionMs + 20);
+  window.setTimeout(fitTerminalNow, terminalKeyboardTransitionMs + 120);
 }
 
 function getViewportMetrics(): ViewportMetrics {
@@ -597,7 +605,7 @@ function setKeyboardOpen(open: boolean) {
   } else {
     restoreFabPosition();
   }
-  fitTerminal();
+  scheduleTerminalFit();
 }
 
 function updateModifierButtons() {
@@ -1022,6 +1030,11 @@ terminal.onData((data) => sendInput(data));
 terminal.onResize(sendResize);
 
 bindTerminalViewportTouchScroll();
+
+if ('ResizeObserver' in window) {
+  const terminalResizeObserver = new ResizeObserver(() => fitTerminal());
+  terminalResizeObserver.observe(terminalHost);
+}
 
 fab.addEventListener('pointerdown', (event) => {
   if (event.button !== 0) return;
