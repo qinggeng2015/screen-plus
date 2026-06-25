@@ -110,6 +110,7 @@ button {
 .terminal-host .xterm {
   height: 100%;
   padding: 0;
+  touch-action: pan-y;
 }
 
 .terminal-host .xterm-viewport {
@@ -121,6 +122,17 @@ button {
 
 .terminal-host .xterm-screen {
   contain: paint;
+  touch-action: pan-y;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .terminal-host .xterm-screen {
+    pointer-events: none;
+  }
+
+  .terminal-host .xterm-viewport {
+    pointer-events: auto;
+  }
 }
 
 .session-chip {
