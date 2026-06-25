@@ -10,6 +10,7 @@ RUN apt-get update \
 
 COPY index.html tsconfig.json vite.config.ts ./
 COPY src ./src
+COPY public ./public
 RUN npm run build
 
 FROM node:22-bookworm-slim AS deps

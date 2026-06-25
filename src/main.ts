@@ -76,6 +76,18 @@ function withBasePath(path: string) {
   return `${appBasePath}${normalizedPath}`;
 }
 
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register(withBasePath('/service-worker.js'), {
+      scope: `${appBasePath || ''}/`
+    }).catch(() => {
+      // Service workers require a secure context; LAN HTTP installs may still use the manifest fallback.
+    });
+  });
+}
+
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing app element');
 
@@ -1059,6 +1071,7 @@ window.addEventListener('beforeunload', () => {
 });
 
 applyTheme(readStoredTheme(), false);
+registerServiceWorker();
 syncViewportSize();
 loadAuthStatus().catch((error) => {
   authGate.dataset.visible = 'true';

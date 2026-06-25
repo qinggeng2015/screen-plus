@@ -1,0 +1,28 @@
+{
+  "name": "Screen Plus",
+  "short_name": "Screen Plus",
+  "description": "A web terminal for GNU Screen sessions.",
+  "id": ".",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "browser"],
+  "orientation": "any",
+  "background_color": "#06080a",
+  "theme_color": "#06080a",
+  "categories": ["utilities", "productivity", "developer"],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

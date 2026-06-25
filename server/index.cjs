@@ -57,7 +57,7 @@ function forwardedBasePath(req) {
 }
 
 function inferredServicePath(pathname) {
-  for (const segment of ['api', 'assets', 'term']) {
+  for (const segment of ['api', 'assets', 'term', 'icons', 'manifest.json', 'manifest.webmanifest', 'service-worker.js']) {
     const rootPath = `/${segment}`;
     if (pathname === rootPath || pathname.startsWith(`${rootPath}/`)) {
       return { basePath: '', pathname };
@@ -105,6 +105,47 @@ function shouldRedirectToDirectory(req, pathname) {
 
 function requestBasePath(req) {
   return BASE_PATH || forwardedBasePath(req) || normalizeBasePath(req.screenPlusBasePath);
+}
+
+function withRequestBasePath(req, pathname) {
+  const normalizedPathname = pathname.startsWith('/') ? pathname : `/${pathname}`;
+  return `${requestBasePath(req)}${normalizedPathname}`;
+}
+
+function appScope(req) {
+  return `${requestBasePath(req) || ''}/`;
+}
+
+function webManifest(req) {
+  const scope = appScope(req);
+  return {
+    name: 'Screen Plus',
+    short_name: 'Screen Plus',
+    description: 'A web terminal for GNU Screen sessions.',
+    id: scope,
+    start_url: scope,
+    scope,
+    display: 'standalone',
+    display_override: ['window-controls-overlay', 'standalone', 'browser'],
+    orientation: 'any',
+    background_color: '#06080a',
+    theme_color: '#06080a',
+    categories: ['utilities', 'productivity', 'developer'],
+    icons: [
+      {
+        src: withRequestBasePath(req, '/icons/icon-192.png'),
+        sizes: '192x192',
+        type: 'image/png',
+        purpose: 'any maskable'
+      },
+      {
+        src: withRequestBasePath(req, '/icons/icon-512.png'),
+        sizes: '512x512',
+        type: 'image/png',
+        purpose: 'any maskable'
+      }
+    ]
+  };
 }
 
 function stripBasePath(req, res, next) {
@@ -723,6 +764,12 @@ app.delete('/api/sessions/:id', async (req, res, next) => {
 });
 
 if (fs.existsSync(STATIC_DIR)) {
+  app.get('/manifest.json', (req, res) => {
+    res.type('application/manifest+json').json(webManifest(req));
+  });
+  app.get('/manifest.webmanifest', (req, res) => {
+    res.type('application/manifest+json').json(webManifest(req));
+  });
   app.use(express.static(STATIC_DIR, { index: false }));
   app.get('*', (req, res) => {
     res.type('html').send(renderIndexHtml(req));

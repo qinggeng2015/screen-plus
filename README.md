@@ -22,6 +22,8 @@ npm start
 
 首次访问页面时需要设置用户名和密码。密码会以哈希形式保存到配置文件中，后续重启服务不需要重新设置。
 
+页面包含 Web App Manifest 和 Service Worker，可在 Android Chrome 中通过浏览器菜单安装到桌面，安装后会以独立窗口方式打开。Chrome 对完整 PWA 安装通常要求 HTTPS，`localhost` 例外；如果使用局域网 IP 访问，建议在前面加 HTTPS 反向代理，否则浏览器可能只显示“添加到主屏幕”。
+
 如果需要挂在反向代理的子路径下，例如通过 `/screen/`、`/a/`、`/b/` 访问当前服务，服务会默认从请求路径自动推断前缀。反向代理需要同时转发 HTTP 和 WebSocket。以 Nginx 为例：
 
 ```nginx
