@@ -247,6 +247,20 @@ function fitTerminal() {
   });
 }
 
+function syncViewportSize() {
+  const viewport = window.visualViewport;
+  const top = viewport ? viewport.offsetTop : 0;
+  const height = viewport ? viewport.height : window.innerHeight;
+  document.documentElement.style.setProperty('--app-top', `${Math.max(0, Math.floor(top))}px`);
+  document.documentElement.style.setProperty('--app-height', `${Math.max(1, Math.floor(height))}px`);
+  if (isDraggingFab) {
+    constrainFabPosition();
+  } else {
+    restoreFabPosition();
+  }
+  fitTerminal();
+}
+
 function sendResize() {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify({
@@ -356,7 +370,11 @@ function setDrawerOpen(open: boolean) {
 
 function setKeyboardOpen(open: boolean) {
   shell.dataset.keyboardOpen = String(open);
-  constrainFabPosition();
+  if (isDraggingFab) {
+    constrainFabPosition();
+  } else {
+    restoreFabPosition();
+  }
   fitTerminal();
 }
 
@@ -638,8 +656,11 @@ function keyboardReservedHeight() {
 }
 
 function clampFabPosition(left: number, top: number) {
-  const maxLeft = Math.max(fabGap, window.innerWidth - fabSize - fabGap);
-  const maxTop = Math.max(fabGap, window.innerHeight - keyboardReservedHeight() - fabSize - fabGap);
+  const shellRect = shell.getBoundingClientRect();
+  const viewportWidth = shellRect.width || window.innerWidth;
+  const viewportHeight = shellRect.height || window.innerHeight;
+  const maxLeft = Math.max(fabGap, viewportWidth - fabSize - fabGap);
+  const maxTop = Math.max(fabGap, viewportHeight - keyboardReservedHeight() - fabSize - fabGap);
 
   return {
     left: Math.min(Math.max(fabGap, left), maxLeft),
@@ -669,9 +690,10 @@ function constrainFabPosition() {
 }
 
 function restoreFabPosition() {
+  const shellRect = shell.getBoundingClientRect();
   const fallback = {
-    left: window.innerWidth - fabSize - fabGap,
-    top: window.innerHeight - keyboardReservedHeight() - fabSize - fabGap
+    left: (shellRect.width || window.innerWidth) - fabSize - fabGap,
+    top: (shellRect.height || window.innerHeight) - keyboardReservedHeight() - fabSize - fabGap
   };
 
   try {
@@ -816,12 +838,13 @@ keyboard.addEventListener('click', (event) => {
 });
 
 window.addEventListener('resize', () => {
-  constrainFabPosition();
-  fitTerminal();
+  syncViewportSize();
 });
 window.visualViewport?.addEventListener('resize', () => {
-  constrainFabPosition();
-  fitTerminal();
+  syncViewportSize();
+});
+window.visualViewport?.addEventListener('scroll', () => {
+  syncViewportSize();
 });
 
 sessionRefreshTimer = window.setInterval(() => {
@@ -834,8 +857,7 @@ window.addEventListener('beforeunload', () => {
 });
 
 applyTheme(readStoredTheme(), false);
-restoreFabPosition();
-fitTerminal();
+syncViewportSize();
 loadAuthStatus().catch((error) => {
   authGate.dataset.visible = 'true';
   authMessage.textContent = error instanceof Error ? error.message : '认证状态读取失败';
