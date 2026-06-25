@@ -306,6 +306,7 @@ let lastViewportMetrics: ViewportMetrics | null = null;
 let terminalTouchScrollUntil = 0;
 let postTouchFitTimer = 0;
 let terminalTouchGesture: TerminalTouchGesture | null = null;
+let terminalViewport: HTMLElement | null = null;
 
 function readStoredTheme(): ThemeMode {
   const saved = localStorage.getItem(themeStorageKey);
@@ -436,6 +437,16 @@ function handleTerminalTouchCancel(event: TouchEvent) {
   terminalTouchGesture = null;
   schedulePostTouchFit(120);
   event.stopPropagation();
+}
+
+function bindTerminalViewportTouchScroll() {
+  terminalViewport = terminalHost.querySelector<HTMLElement>('.xterm-viewport');
+  if (!terminalViewport) return;
+
+  terminalViewport.addEventListener('touchstart', handleTerminalTouchStart, { passive: true });
+  terminalViewport.addEventListener('touchmove', handleTerminalTouchMove, { passive: true });
+  terminalViewport.addEventListener('touchend', handleTerminalTouchEnd, { passive: true });
+  terminalViewport.addEventListener('touchcancel', handleTerminalTouchCancel, { passive: true });
 }
 
 function resetTerminalView() {
@@ -1021,10 +1032,7 @@ function restoreFabPosition() {
 terminal.onData((data) => sendInput(data));
 terminal.onResize(sendResize);
 
-terminalHost.addEventListener('touchstart', handleTerminalTouchStart, { capture: true, passive: true });
-terminalHost.addEventListener('touchmove', handleTerminalTouchMove, { capture: true, passive: true });
-terminalHost.addEventListener('touchend', handleTerminalTouchEnd, { capture: true, passive: true });
-terminalHost.addEventListener('touchcancel', handleTerminalTouchCancel, { capture: true, passive: true });
+bindTerminalViewportTouchScroll();
 
 fab.addEventListener('pointerdown', (event) => {
   if (event.button !== 0) return;
