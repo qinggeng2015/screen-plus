@@ -257,6 +257,12 @@ function fitTerminal() {
   requestAnimationFrame(fitTerminalNow);
 }
 
+function resetTerminalView() {
+  terminal.reset();
+  terminal.clear();
+  terminal.write('\x1b[H\x1b[2J');
+}
+
 function syncViewportSize() {
   const viewport = window.visualViewport;
   const top = viewport ? viewport.offsetTop : 0;
@@ -365,7 +371,7 @@ function requireLogin(message = '需要重新登录', setupRequired = false) {
     username: authUsername.value || null
   });
   authMessage.textContent = message;
-  terminal.clear();
+  resetTerminalView();
 }
 
 function setMenuOpen(open: boolean) {
@@ -570,7 +576,7 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
     socket = null;
   }
 
-  if (options.clear !== false) terminal.clear();
+  if (options.clear !== false) resetTerminalView();
   fitTerminalNow();
 
   socket = new WebSocket(websocketUrl(session, force));
@@ -655,7 +661,7 @@ async function closeSession(session: ScreenSession) {
     await reloadSessions();
 
     if (closingActiveSession) {
-      terminal.clear();
+      resetTerminalView();
       const nextSession = selectFallbackSession(session.id, previousSessions);
       if (nextSession) {
         connectSession(nextSession, nextSession.attached);
