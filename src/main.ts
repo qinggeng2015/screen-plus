@@ -155,7 +155,7 @@ app.innerHTML = `
     <section class="terminal-keyboard" id="terminalKeyboard" aria-label="终端快捷键盘">
       <button data-key="escape" type="button">esc</button>
       <button data-key="dash" type="button">-</button>
-      <button data-key="home" type="button">Home</button>
+      <button data-key="shift" type="button" aria-pressed="false">shift</button>
       <button data-key="up" type="button" aria-label="上">↑</button>
       <button data-key="down" type="button" aria-label="下">↓</button>
       <button data-key="left" type="button" aria-label="左">←</button>
@@ -281,6 +281,7 @@ let activeSession: ScreenSession | null = null;
 let sessions: ScreenSession[] = [];
 let ctrlActive = false;
 let altActive = false;
+let shiftActive = false;
 let reconnecting = false;
 let sessionRefreshTimer = 0;
 let connectionHealthTimer = 0;
@@ -535,20 +536,62 @@ function setKeyboardOpen(open: boolean) {
 function updateModifierButtons() {
   keyboard.querySelector<HTMLButtonElement>('[data-key="ctrl"]')?.setAttribute('aria-pressed', String(ctrlActive));
   keyboard.querySelector<HTMLButtonElement>('[data-key="alt"]')?.setAttribute('aria-pressed', String(altActive));
+  keyboard.querySelector<HTMLButtonElement>('[data-key="shift"]')?.setAttribute('aria-pressed', String(shiftActive));
 }
 
 function applyModifiers(data: string) {
   let next = data;
 
-  if (ctrlActive && data.length === 1) {
-    const lower = data.toLowerCase();
+  if (shiftActive) {
+    const shiftedControls: Record<string, string> = {
+      '\t': '\x1b[Z',
+      '\x1b[A': '\x1b[1;2A',
+      '\x1b[B': '\x1b[1;2B',
+      '\x1b[C': '\x1b[1;2C',
+      '\x1b[D': '\x1b[1;2D'
+    };
+    const shiftedCharacters: Record<string, string> = {
+      '`': '~',
+      '1': '!',
+      '2': '@',
+      '3': '#',
+      '4': '$',
+      '5': '%',
+      '6': '^',
+      '7': '&',
+      '8': '*',
+      '9': '(',
+      '0': ')',
+      '-': '_',
+      '=': '+',
+      '[': '{',
+      ']': '}',
+      '\\': '|',
+      ';': ':',
+      "'": '"',
+      ',': '<',
+      '.': '>',
+      '/': '?'
+    };
+
+    if (shiftedControls[next]) {
+      next = shiftedControls[next];
+    } else if (next.length === 1 && /[a-z]/.test(next)) {
+      next = next.toUpperCase();
+    } else if (next.length === 1 && shiftedCharacters[next]) {
+      next = shiftedCharacters[next];
+    }
+  }
+
+  if (ctrlActive && next.length === 1) {
+    const lower = next.toLowerCase();
     if (lower >= 'a' && lower <= 'z') next = String.fromCharCode(lower.charCodeAt(0) - 96);
-    if (data === ' ') next = '\x00';
-    if (data === '[') next = '\x1b';
-    if (data === '\\') next = '\x1c';
-    if (data === ']') next = '\x1d';
-    if (data === '^') next = '\x1e';
-    if (data === '_') next = '\x1f';
+    if (next === ' ') next = '\x00';
+    if (next === '[') next = '\x1b';
+    if (next === '\\') next = '\x1c';
+    if (next === ']') next = '\x1d';
+    if (next === '^') next = '\x1e';
+    if (next === '_') next = '\x1f';
   }
 
   if (altActive) next = `\x1b${next}`;
@@ -561,9 +604,10 @@ function sendInput(data: string) {
     return;
   }
   const modifiedData = applyModifiers(data);
-  const hadModifier = ctrlActive || altActive;
+  const hadModifier = ctrlActive || altActive || shiftActive;
   ctrlActive = false;
   altActive = false;
+  shiftActive = false;
   if (hadModifier) updateModifierButtons();
 
   socket.send(JSON.stringify({ type: 'input', data: modifiedData }));
@@ -1015,7 +1059,6 @@ keyboard.addEventListener('click', (event) => {
   const keyMap: Record<string, string> = {
     escape: '\x1b',
     dash: '-',
-    home: '\x1b[H',
     up: '\x1b[A',
     down: '\x1b[B',
     right: '\x1b[C',
@@ -1032,6 +1075,13 @@ keyboard.addEventListener('click', (event) => {
 
   if (key === 'alt') {
     altActive = !altActive;
+    updateModifierButtons();
+    terminal.focus();
+    return;
+  }
+
+  if (key === 'shift') {
+    shiftActive = !shiftActive;
     updateModifierButtons();
     terminal.focus();
     return;
