@@ -256,24 +256,17 @@ const terminal = new Terminal({
   lineHeight: 1.18,
   scrollback: 10000,
   scrollSensitivity: 1,
+  fastScrollSensitivity: 5,
+  smoothScrollDuration: 80,
+  scrollbar: {
+    width: 12
+  },
   theme: terminalThemes.dark
 });
 
 const fitAddon = new FitAddon();
 terminal.loadAddon(fitAddon);
 terminal.open(terminalHost);
-terminal.attachCustomWheelEventHandler((event) => {
-  event.preventDefault();
-  event.stopPropagation();
-
-  const direction = event.deltaY > 0 ? 1 : -1;
-  const magnitude = event.deltaMode === WheelEvent.DOM_DELTA_LINE
-    ? Math.abs(event.deltaY)
-    : Math.max(1, Math.ceil(Math.abs(event.deltaY) / 40));
-  terminal.scrollLines(direction * Math.min(24, magnitude));
-
-  return false;
-});
 
 const fabPositionStorageKey = 'screen-plus:floating-button-position';
 const themeStorageKey = 'screen-plus:theme';
@@ -393,7 +386,7 @@ function handleTerminalTouchCancel() {
 }
 
 function bindTerminalViewportTouchScroll() {
-  terminalViewport = terminalHost.querySelector<HTMLElement>('.xterm-viewport');
+  terminalViewport = terminalHost.querySelector<HTMLElement>('.xterm-scrollable-element, .xterm-viewport');
   if (!terminalViewport) return;
 
   terminalViewport.addEventListener('touchstart', handleTerminalTouchStart, { passive: true });

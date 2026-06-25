@@ -113,6 +113,11 @@ button {
   touch-action: pan-y;
 }
 
+.terminal-host .xterm-scrollable-element {
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+
 .terminal-host .xterm-viewport {
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
