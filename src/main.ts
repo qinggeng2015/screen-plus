@@ -249,6 +249,7 @@ const themeStorageKey = 'screen-plus:theme';
 const fabSize = 58;
 const fabGap = 18;
 const socketIdleReconnectMs = 90_000;
+const viewportKeyboardInsetThreshold = 120;
 let socket: WebSocket | null = null;
 let activeSession: ScreenSession | null = null;
 let sessions: ScreenSession[] = [];
@@ -265,6 +266,131 @@ let isDraggingFab = false;
 let fabDragMoved = false;
 let fabPointerId: number | null = null;
 let fabDragOffset = { x: 0, y: 0 };
+let stableTerminalSize = { cols: 120, rows: 32 };
+let stableViewportReference = {
+  width: Math.round(window.visualViewport?.width || window.innerWidth),
+  height: Math.round(window.visualViewport?.height || window.innerHeight)
+};
+
+function isCoarsePointerDevice() {
+  return window.matchMedia('(pointer: coarse)').matches;
+}
+
+function currentViewportSize() {
+  const viewport = window.visualViewport;
+  return {
+    width: Math.round(viewport?.width || window.innerWidth),
+    height: Math.round(viewport?.height || window.innerHeight)
+  };
+}
+
+function refreshViewportReferenceForOrientation(size = currentViewportSize()) {
+  if (Math.abs(size.width - stableViewportReference.width) > 80) {
+    stableViewportReference = size;
+  }
+}
+
+function isViewportReducedByKeyboard() {
+  const viewport = window.visualViewport;
+  const size = currentViewportSize();
+  refreshViewportReferenceForOrientation(size);
+
+  const visualInset = viewport ? window.innerHeight - viewport.height : 0;
+  const historicalInset = stableViewportReference.height - size.height;
+  return visualInset > viewportKeyboardInsetThreshold || historicalInset > viewportKeyboardInsetThreshold;
+}
+
+function blurActiveFormControl() {
+  const active = document.activeElement;
+  if (
+    active instanceof HTMLInputElement
+    || active instanceof HTMLTextAreaElement
+    || active instanceof HTMLSelectElement
+  ) {
+    active.blur();
+  }
+}
+
+function nextFrameOrTimeout(timeoutMs = 80) {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      resolve();
+    };
+    const timer = window.setTimeout(finish, timeoutMs);
+    requestAnimationFrame(finish);
+  });
+}
+
+function waitForKeyboardViewportRestore(timeoutMs = 900) {
+  return new Promise<void>((resolve) => {
+    const start = performance.now();
+    let stableFrames = 0;
+    let timeoutTimer = 0;
+    let pollTimer = 0;
+
+    const finish = () => {
+      window.clearTimeout(timeoutTimer);
+      window.clearTimeout(pollTimer);
+      resolve();
+    };
+
+    const tick = () => {
+      stableFrames = isViewportReducedByKeyboard() ? 0 : stableFrames + 1;
+
+      if (stableFrames >= 2 || performance.now() - start >= timeoutMs) {
+        finish();
+        return;
+      }
+
+      pollTimer = window.setTimeout(() => requestAnimationFrame(tick), 50);
+    };
+
+    timeoutTimer = window.setTimeout(finish, timeoutMs);
+    requestAnimationFrame(tick);
+  });
+}
+
+function rememberStableTerminalSize() {
+  if (!isViewportReducedByKeyboard()) {
+    const size = currentViewportSize();
+    stableViewportReference = {
+      width: size.width,
+      height: Math.max(stableViewportReference.height, size.height)
+    };
+  }
+
+  if (terminal.cols && terminal.rows && !isViewportReducedByKeyboard()) {
+    stableTerminalSize = { cols: terminal.cols, rows: terminal.rows };
+  }
+
+  return stableTerminalSize;
+}
+
+function terminalSizeForSession() {
+  return isViewportReducedByKeyboard() ? stableTerminalSize : rememberStableTerminalSize();
+}
+
+function focusTerminalIfAppropriate(source: 'auto' | 'user' = 'user') {
+  if (source === 'auto' && isCoarsePointerDevice()) return;
+  terminal.focus();
+}
+
+async function prepareTerminalSizeForSession() {
+  blurActiveFormControl();
+
+  if (isViewportReducedByKeyboard()) {
+    await waitForKeyboardViewportRestore();
+  }
+
+  fitTerminalNow();
+  await nextFrameOrTimeout();
+  fitTerminalNow();
+  return rememberStableTerminalSize();
+}
 
 function readStoredTheme(): ThemeMode {
   const saved = localStorage.getItem(themeStorageKey);
@@ -288,6 +414,7 @@ function applyTheme(mode: ThemeMode, persist = true) {
 function fitTerminalNow() {
   try {
     fitAddon.fit();
+    rememberStableTerminalSize();
     sendResize();
   } catch {
     // The terminal can briefly be hidden while the auth gate is settling.
@@ -296,6 +423,10 @@ function fitTerminalNow() {
 
 function fitTerminal() {
   requestAnimationFrame(fitTerminalNow);
+}
+
+function refreshTerminalDisplay() {
+  terminal.refresh(0, Math.max(0, terminal.rows - 1));
 }
 
 function resetTerminalView() {
@@ -320,6 +451,8 @@ function syncViewportSize() {
 
 function sendResize() {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (isViewportReducedByKeyboard()) return;
+
   socket.send(JSON.stringify({
     type: 'resize',
     cols: terminal.cols,
@@ -464,7 +597,7 @@ function sendInput(data: string) {
     return;
   }
   socket.send(JSON.stringify({ type: 'input', data: applyModifiers(data) }));
-  terminal.focus();
+  focusTerminalIfAppropriate('auto');
 }
 
 function updateSessionChip(message?: string) {
@@ -575,11 +708,12 @@ function selectFallbackSession(closedSessionId: string, previousSessions = sessi
 
 function websocketUrl(session: ScreenSession, force: boolean) {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const size = terminalSizeForSession();
   const params = new URLSearchParams({
     session: session.id,
     force: force ? '1' : '0',
-    cols: String(terminal.cols || 120),
-    rows: String(terminal.rows || 32)
+    cols: String(size.cols),
+    rows: String(size.rows)
   });
   return `${protocol}//${window.location.host}${withBasePath('/term')}?${params.toString()}`;
 }
@@ -629,7 +763,10 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
     fitTerminalNow();
     window.setTimeout(fitTerminalNow, 120);
     window.setTimeout(fitTerminalNow, 400);
-    terminal.focus();
+    refreshTerminalDisplay();
+    window.setTimeout(refreshTerminalDisplay, 120);
+    window.setTimeout(refreshTerminalDisplay, 400);
+    focusTerminalIfAppropriate('auto');
     refreshSessions();
   });
 
@@ -661,10 +798,10 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
 async function openDefaultSession() {
   updateSessionChip('正在选择默认会话');
   try {
-    fitTerminalNow();
+    const size = await prepareTerminalSizeForSession();
     const { session } = await api<SessionResponse>('/api/sessions/default', {
       method: 'POST',
-      body: JSON.stringify({ cols: terminal.cols || 120, rows: terminal.rows || 32 })
+      body: JSON.stringify(size)
     });
     activeSession = session;
     connectSession(session, false);
@@ -678,10 +815,10 @@ async function openDefaultSession() {
 
 async function createNewSession() {
   try {
-    fitTerminalNow();
+    const size = await prepareTerminalSizeForSession();
     const { session } = await api<SessionResponse>('/api/sessions', {
       method: 'POST',
-      body: JSON.stringify({ cols: terminal.cols || 120, rows: terminal.rows || 32 })
+      body: JSON.stringify(size)
     });
     await refreshSessions();
     connectSession(session, false);
@@ -918,14 +1055,14 @@ keyboard.addEventListener('click', (event) => {
   if (key === 'ctrl') {
     ctrlActive = !ctrlActive;
     updateModifierButtons();
-    terminal.focus();
+    focusTerminalIfAppropriate('auto');
     return;
   }
 
   if (key === 'alt') {
     altActive = !altActive;
     updateModifierButtons();
-    terminal.focus();
+    focusTerminalIfAppropriate('auto');
     return;
   }
 
