@@ -313,6 +313,8 @@ function applyTheme(mode: ThemeMode, persist = true) {
   shell.dataset.theme = mode;
   terminal.options.theme = terminalThemes[mode];
   document.documentElement.style.colorScheme = mode;
+  document.documentElement.style.backgroundColor = terminalThemes[mode].background;
+  document.body.style.backgroundColor = terminalThemes[mode].background;
   themeColorMeta?.setAttribute('content', appThemeColors[mode]);
   appleStatusBarMeta?.setAttribute('content', 'default');
   themeToggle.setAttribute('aria-pressed', String(mode === 'light'));
@@ -348,8 +350,8 @@ function getViewportMetrics(): ViewportMetrics {
   const viewport = window.visualViewport;
   return {
     top: Math.max(0, Math.floor(viewport ? viewport.offsetTop : 0)),
-    width: Math.max(1, Math.floor(viewport ? viewport.width : window.innerWidth)),
-    height: Math.max(1, Math.floor(viewport ? viewport.height : window.innerHeight))
+    width: Math.max(1, Math.ceil(viewport ? viewport.width : window.innerWidth)),
+    height: Math.max(1, Math.ceil(viewport ? viewport.height : window.innerHeight))
   };
 }
 

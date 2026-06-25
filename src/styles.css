@@ -4,6 +4,7 @@
   --app-top: 0px;
   --app-height: 100vh;
   --keyboard-height: 0px;
+  --keyboard-overlap: 0px;
   --page-bg: #06080a;
   --text-main: #d7e1df;
   --terminal-band: #06080a;
@@ -46,6 +47,7 @@ body,
   height: 100%;
   margin: 0;
   overflow: hidden;
+  background: var(--terminal-band);
 }
 
 button {
@@ -91,34 +93,41 @@ button {
 
 .app-shell[data-keyboard-open="true"] {
   --keyboard-height: 58px;
+  --keyboard-overlap: 1px;
 }
 
 .terminal-frame {
   position: absolute;
-  inset: 0 0 var(--keyboard-height) 0;
+  inset: 0 0 calc(var(--keyboard-height) - var(--keyboard-overlap)) 0;
   min-width: 0;
   min-height: 0;
+  background: var(--terminal-band);
   transition: inset 180ms ease;
 }
 
 .terminal-host {
   position: absolute;
-  inset: 0;
+  inset: 0 0 -1px 0;
   overflow: hidden;
+  background: var(--terminal-band);
 }
 
 .terminal-host .xterm {
   height: 100%;
   padding: 0;
+  background: var(--terminal-band);
   touch-action: pan-y;
 }
 
 .terminal-host .xterm-scrollable-element {
+  min-height: calc(100% + 1px);
+  background: var(--terminal-band);
   overscroll-behavior: contain;
   touch-action: pan-y;
 }
 
 .terminal-host .xterm-viewport {
+  background: var(--terminal-band);
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
@@ -126,6 +135,7 @@ button {
 }
 
 .terminal-host .xterm-screen {
+  min-height: calc(100% + 1px);
   contain: paint;
   touch-action: pan-y;
   will-change: transform;
@@ -522,18 +532,18 @@ button {
 .terminal-keyboard {
   position: absolute;
   right: 0;
-  bottom: 0;
+  bottom: -1px;
   left: 0;
   z-index: 35;
   display: grid;
-  height: calc(58px + env(safe-area-inset-bottom));
+  height: calc(59px + env(safe-area-inset-bottom));
   grid-template-columns: repeat(10, minmax(0, 1fr));
   grid-auto-rows: 34px;
   gap: 4px;
   padding: 7px max(7px, env(safe-area-inset-right)) calc(7px + env(safe-area-inset-bottom)) max(7px, env(safe-area-inset-left));
-  border-top: 1px solid var(--border-subtle);
+  border-top: 0;
   background: var(--surface);
-  box-shadow: 0 -18px 44px var(--shadow-strong);
+  box-shadow: 0 -1px 0 var(--surface), 0 -18px 44px var(--shadow-strong);
   transform: translateY(105%);
   transition: transform 180ms ease;
   backdrop-filter: blur(20px);
@@ -572,7 +582,7 @@ button {
   }
 
   .terminal-keyboard {
-    height: calc(82px + env(safe-area-inset-bottom));
+    height: calc(83px + env(safe-area-inset-bottom));
     grid-template-columns: repeat(5, minmax(0, 1fr));
     grid-auto-rows: 34px;
   }
