@@ -37,6 +37,12 @@ type AuthStatusResponse = {
 
 type ThemeMode = 'dark' | 'light';
 
+type ViewportMetrics = {
+  top: number;
+  width: number;
+  height: number;
+};
+
 function normalizeBasePath(value: string | undefined) {
   const trimmed = String(value || '').trim();
   if (!trimmed || trimmed === '/') return '';
@@ -249,6 +255,8 @@ const themeStorageKey = 'screen-plus:theme';
 const fabSize = 58;
 const fabGap = 18;
 const socketIdleReconnectMs = 90_000;
+const viewportMetricTolerance = 1;
+const terminalTouchScrollGuardMs = 220;
 let socket: WebSocket | null = null;
 let activeSession: ScreenSession | null = null;
 let sessions: ScreenSession[] = [];
@@ -265,6 +273,11 @@ let isDraggingFab = false;
 let fabDragMoved = false;
 let fabPointerId: number | null = null;
 let fabDragOffset = { x: 0, y: 0 };
+let viewportSyncFrame = 0;
+let pendingViewportForceFit = false;
+let lastViewportMetrics: ViewportMetrics | null = null;
+let terminalTouchScrollUntil = 0;
+let postTouchFitTimer = 0;
 
 function readStoredTheme(): ThemeMode {
   const saved = localStorage.getItem(themeStorageKey);
@@ -298,24 +311,86 @@ function fitTerminal() {
   requestAnimationFrame(fitTerminalNow);
 }
 
+function getViewportMetrics(): ViewportMetrics {
+  const viewport = window.visualViewport;
+  return {
+    top: Math.max(0, Math.floor(viewport ? viewport.offsetTop : 0)),
+    width: Math.max(1, Math.floor(viewport ? viewport.width : window.innerWidth)),
+    height: Math.max(1, Math.floor(viewport ? viewport.height : window.innerHeight))
+  };
+}
+
+function viewportMetricChanged(previous: number, next: number) {
+  return Math.abs(previous - next) > viewportMetricTolerance;
+}
+
+function isTerminalTouchScrolling() {
+  return performance.now() < terminalTouchScrollUntil;
+}
+
+function schedulePostTouchFit(delay = terminalTouchScrollGuardMs + 80) {
+  window.clearTimeout(postTouchFitTimer);
+  postTouchFitTimer = window.setTimeout(() => {
+    const remainingGuardMs = terminalTouchScrollUntil - performance.now();
+    if (remainingGuardMs > 0) {
+      postTouchFitTimer = 0;
+      schedulePostTouchFit(remainingGuardMs + 40);
+      return;
+    }
+
+    postTouchFitTimer = 0;
+    fitTerminalNow();
+  }, delay);
+}
+
+function markTerminalTouchScroll() {
+  terminalTouchScrollUntil = performance.now() + terminalTouchScrollGuardMs;
+  schedulePostTouchFit();
+}
+
 function resetTerminalView() {
   terminal.reset();
   terminal.clear();
   terminal.write('\x1b[H\x1b[2J');
 }
 
-function syncViewportSize() {
-  const viewport = window.visualViewport;
-  const top = viewport ? viewport.offsetTop : 0;
-  const height = viewport ? viewport.height : window.innerHeight;
-  document.documentElement.style.setProperty('--app-top', `${Math.max(0, Math.floor(top))}px`);
-  document.documentElement.style.setProperty('--app-height', `${Math.max(1, Math.floor(height))}px`);
-  if (isDraggingFab) {
-    constrainFabPosition();
-  } else {
-    restoreFabPosition();
-  }
-  fitTerminal();
+function syncViewportSize(forceFit = false) {
+  pendingViewportForceFit = pendingViewportForceFit || forceFit;
+  if (viewportSyncFrame) return;
+
+  viewportSyncFrame = window.requestAnimationFrame(() => {
+    viewportSyncFrame = 0;
+    const shouldForceFit = pendingViewportForceFit;
+    pendingViewportForceFit = false;
+
+    const metrics = getViewportMetrics();
+    const previous = lastViewportMetrics;
+    const sizeChanged = !previous
+      || viewportMetricChanged(previous.width, metrics.width)
+      || viewportMetricChanged(previous.height, metrics.height);
+    const topChanged = !previous || viewportMetricChanged(previous.top, metrics.top);
+
+    if (sizeChanged || topChanged) {
+      document.documentElement.style.setProperty('--app-top', `${metrics.top}px`);
+      document.documentElement.style.setProperty('--app-height', `${metrics.height}px`);
+      lastViewportMetrics = metrics;
+
+      if (isDraggingFab) {
+        constrainFabPosition();
+      } else {
+        restoreFabPosition();
+      }
+    }
+
+    if (!sizeChanged && !shouldForceFit) return;
+
+    if (isTerminalTouchScrolling()) {
+      schedulePostTouchFit();
+      return;
+    }
+
+    fitTerminalNow();
+  });
 }
 
 function sendResize() {
@@ -806,6 +881,11 @@ function restoreFabPosition() {
 
 terminal.onData((data) => sendInput(data));
 terminal.onResize(sendResize);
+
+terminalHost.addEventListener('touchstart', () => markTerminalTouchScroll(), { passive: true });
+terminalHost.addEventListener('touchmove', () => markTerminalTouchScroll(), { passive: true });
+terminalHost.addEventListener('touchend', () => schedulePostTouchFit(120), { passive: true });
+terminalHost.addEventListener('touchcancel', () => schedulePostTouchFit(120), { passive: true });
 
 fab.addEventListener('pointerdown', (event) => {
   if (event.button !== 0) return;
