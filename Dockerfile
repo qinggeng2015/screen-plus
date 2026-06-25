@@ -29,19 +29,21 @@ WORKDIR /app
 ENV NODE_ENV=production \
   HOST=0.0.0.0 \
   PORT=3000 \
+  HOME=/data/home \
   SCREEN_PLUS_STATE_DIR=/data \
   SCREEN_PLUS_CONFIG=/data/config.json \
   SCREEN_PLUS_SCREENRC=/app/screen-plus.screenrc \
   SCREEN_PLUS_SHELL=/usr/bin/zsh \
+  SCREEN_PLUS_HOME=/data/home \
   SHELL=/usr/bin/zsh \
   ZDOTDIR=/data/zsh \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends screen tini ca-certificates zsh zsh-autosuggestions zsh-syntax-highlighting \
+  && apt-get install -y --no-install-recommends screen tini ca-certificates openssh-client zsh zsh-autosuggestions zsh-syntax-highlighting \
   && rm -rf /var/lib/apt/lists/* \
-  && mkdir -p /data/zsh
+  && mkdir -p /data/home /data/zsh
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist

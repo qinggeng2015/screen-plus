@@ -25,6 +25,7 @@ const AUTH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PASSWORD_KEY_LENGTH = 64;
 const UTF8_LOCALE = process.env.SCREEN_PLUS_LOCALE
   || (process.env.LANG && /UTF-8/i.test(process.env.LANG) ? process.env.LANG : 'C.UTF-8');
+const SHELL_HOME = process.env.SCREEN_PLUS_HOME || process.env.HOME || os.homedir() || process.cwd();
 
 const app = express();
 app.use(express.json());
@@ -35,9 +36,12 @@ function screenArgs(args) {
   return [...baseArgs, ...args];
 }
 
-function execScreen(args) {
+function execScreen(args, options = {}) {
   return new Promise((resolve, reject) => {
-    execFile(SCREEN_BIN, screenArgs(args), { timeout: 10000 }, (error, stdout, stderr) => {
+    execFile(SCREEN_BIN, screenArgs(args), {
+      timeout: 10000,
+      cwd: options.cwd || process.cwd()
+    }, (error, stdout, stderr) => {
       if (error && error.code !== 1) {
         error.stdout = stdout;
         error.stderr = stderr;
@@ -291,7 +295,7 @@ async function createSession(name) {
   const sessionName = name || `${SESSION_PREFIX}-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;
   validateSessionName(sessionName);
 
-  await execScreen(['-dmS', sessionName]);
+  await execScreen(['-dmS', sessionName], { cwd: SHELL_HOME });
   const sessions = await listSessions();
   const created = sessions.find((session) => session.name === sessionName || session.id.endsWith(`.${sessionName}`));
 
@@ -568,7 +572,7 @@ wss.on('connection', async (ws, _request, url) => {
       name: 'xterm-256color',
       cols,
       rows,
-      cwd: process.env.HOME || os.homedir() || process.cwd(),
+      cwd: SHELL_HOME,
       env: {
         ...process.env,
         LANG: process.env.LANG && /UTF-8/i.test(process.env.LANG) ? process.env.LANG : UTF8_LOCALE,

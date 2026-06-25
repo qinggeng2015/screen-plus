@@ -38,7 +38,7 @@ http://127.0.0.1:3000
 
 `docker-compose.yml` 会把 `/data` 挂载到命名卷 `screen-plus-data`，认证配置默认保存到 `/data/config.json`。只要这个卷不删除，设置完密码后重启或重建容器都不会二次设置。
 
-Docker 镜像内默认安装并使用 `zsh`，同时安装了 `zsh-autosuggestions` 和 `zsh-syntax-highlighting`。容器内 zsh 配置位于 `/data/zsh/.zshrc`，历史记录位于 `/data/zsh/.zsh_history`，都会随 `screen-plus-data` 卷持久化。
+Docker 镜像内默认安装了 `openssh-client`，并默认使用 `zsh`，同时安装了 `zsh-autosuggestions` 和 `zsh-syntax-highlighting`。容器内默认用户目录是 `/data/home`，zsh 配置位于 `/data/zsh/.zshrc`，历史记录位于 `/data/zsh/.zsh_history`，都会随 `screen-plus-data` 卷持久化。
 
 也可以使用已发布镜像：
 
@@ -62,6 +62,7 @@ docker run -d \
 - `SCREEN_PLUS_CONFIG`: 认证配置文件路径，默认 `.screen-plus/config.json`，Docker 中默认 `/data/config.json`
 - `SCREEN_PLUS_LOCALE`: 终端 UTF-8 locale，默认跟随环境变量，容器中默认 `C.UTF-8`
 - `SCREEN_PLUS_SHELL`: screen 会话使用的 shell，Docker 中默认 `/usr/bin/zsh`
+- `SCREEN_PLUS_HOME`: 新建 screen 会话和 attach 进程的默认目录，默认使用当前用户 HOME
 - `SHELL`: screen 会话默认 shell，Docker 中默认 `/usr/bin/zsh`
 - `ZDOTDIR`: zsh 配置目录，Docker 中默认 `/data/zsh`
 

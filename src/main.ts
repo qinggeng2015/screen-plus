@@ -207,6 +207,7 @@ const fabPositionStorageKey = 'screen-plus:floating-button-position';
 const themeStorageKey = 'screen-plus:theme';
 const fabSize = 58;
 const fabGap = 18;
+const socketIdleReconnectMs = 90_000;
 let socket: WebSocket | null = null;
 let activeSession: ScreenSession | null = null;
 let sessions: ScreenSession[] = [];
@@ -214,6 +215,9 @@ let ctrlActive = false;
 let altActive = false;
 let reconnecting = false;
 let sessionRefreshTimer = 0;
+let connectionHealthTimer = 0;
+let lastSocketActivityAt = 0;
+let reconnectAfterResume = false;
 let authMode: 'setup' | 'login' = 'login';
 let terminalStarted = false;
 let isDraggingFab = false;
@@ -402,7 +406,10 @@ function applyModifiers(data: string) {
 }
 
 function sendInput(data: string) {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    ensureActiveConnection('resume');
+    return;
+  }
   socket.send(JSON.stringify({ type: 'input', data: applyModifiers(data) }));
   terminal.focus();
 }
@@ -524,9 +531,30 @@ function websocketUrl(session: ScreenSession, force: boolean) {
   return `${protocol}//${window.location.host}/term?${params.toString()}`;
 }
 
-function connectSession(session: ScreenSession, force = false) {
+function ensureActiveConnection(reason = 'resume') {
+  if (!terminalStarted || !activeSession) return;
+  if (document.visibilityState === 'hidden') return;
+  if (reconnecting || reconnectAfterResume) return;
+
+  const stale = lastSocketActivityAt > 0 && Date.now() - lastSocketActivityAt > socketIdleReconnectMs;
+  const closed = !socket || socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED;
+  if (!closed && socket.readyState === WebSocket.OPEN && !stale) return;
+
+  reconnectAfterResume = true;
+  const session = activeSession;
+  updateSessionChip(reason === 'stale' ? '正在恢复连接' : '正在重新连接');
+  window.setTimeout(() => {
+    reconnectAfterResume = false;
+    if (!terminalStarted || activeSession?.id !== session.id) return;
+    connectSession(session, session.attached, { clear: false });
+  }, 120);
+}
+
+function connectSession(session: ScreenSession, force = false, options: { clear?: boolean } = {}) {
   activeSession = session;
   reconnecting = true;
+  reconnectAfterResume = false;
+  lastSocketActivityAt = Date.now();
   updateSessionChip(force && session.attached ? `正在接管 ${session.name}` : `正在打开 ${session.name}`);
   renderSessions();
 
@@ -536,13 +564,14 @@ function connectSession(session: ScreenSession, force = false) {
     socket = null;
   }
 
-  terminal.clear();
+  if (options.clear !== false) terminal.clear();
   fitTerminal();
 
   socket = new WebSocket(websocketUrl(session, force));
 
   socket.addEventListener('open', () => {
     reconnecting = false;
+    lastSocketActivityAt = Date.now();
     updateSessionChip();
     sendResize();
     terminal.focus();
@@ -550,6 +579,7 @@ function connectSession(session: ScreenSession, force = false) {
   });
 
   socket.addEventListener('message', (event) => {
+    lastSocketActivityAt = Date.now();
     if (typeof event.data === 'string') {
       terminal.write(event.data);
       return;
@@ -562,11 +592,13 @@ function connectSession(session: ScreenSession, force = false) {
 
   socket.addEventListener('close', () => {
     if (reconnecting) return;
+    lastSocketActivityAt = 0;
     updateSessionChip('连接已断开');
     refreshSessions();
   });
 
   socket.addEventListener('error', () => {
+    lastSocketActivityAt = 0;
     updateSessionChip('连接失败');
   });
 }
@@ -847,12 +879,39 @@ window.visualViewport?.addEventListener('scroll', () => {
   syncViewportSize();
 });
 
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    syncViewportSize();
+    ensureActiveConnection('resume');
+  }
+});
+
+window.addEventListener('pageshow', () => {
+  syncViewportSize();
+  ensureActiveConnection('resume');
+});
+
+window.addEventListener('focus', () => {
+  ensureActiveConnection('resume');
+});
+
+window.addEventListener('online', () => {
+  ensureActiveConnection('resume');
+});
+
 sessionRefreshTimer = window.setInterval(() => {
   if (shell.dataset.drawerOpen === 'true') refreshSessions();
 }, 5000);
 
+connectionHealthTimer = window.setInterval(() => {
+  if (document.visibilityState === 'visible') {
+    ensureActiveConnection('stale');
+  }
+}, 15_000);
+
 window.addEventListener('beforeunload', () => {
   window.clearInterval(sessionRefreshTimer);
+  window.clearInterval(connectionHealthTimer);
   socket?.close();
 });
 
