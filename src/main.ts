@@ -560,7 +560,13 @@ function sendInput(data: string) {
     ensureActiveConnection('resume');
     return;
   }
-  socket.send(JSON.stringify({ type: 'input', data: applyModifiers(data) }));
+  const modifiedData = applyModifiers(data);
+  const hadModifier = ctrlActive || altActive;
+  ctrlActive = false;
+  altActive = false;
+  if (hadModifier) updateModifierButtons();
+
+  socket.send(JSON.stringify({ type: 'input', data: modifiedData }));
   terminal.focus();
 }
 
