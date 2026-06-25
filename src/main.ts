@@ -620,7 +620,11 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
 async function openDefaultSession() {
   updateSessionChip('正在选择默认会话');
   try {
-    const { session } = await api<SessionResponse>('/api/sessions/default', { method: 'POST' });
+    fitTerminalNow();
+    const { session } = await api<SessionResponse>('/api/sessions/default', {
+      method: 'POST',
+      body: JSON.stringify({ cols: terminal.cols || 120, rows: terminal.rows || 32 })
+    });
     activeSession = session;
     connectSession(session, false);
     await refreshSessions();
@@ -633,7 +637,11 @@ async function openDefaultSession() {
 
 async function createNewSession() {
   try {
-    const { session } = await api<SessionResponse>('/api/sessions', { method: 'POST', body: '{}' });
+    fitTerminalNow();
+    const { session } = await api<SessionResponse>('/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ cols: terminal.cols || 120, rows: terminal.rows || 32 })
+    });
     await refreshSessions();
     connectSession(session, false);
     setDrawerOpen(false);

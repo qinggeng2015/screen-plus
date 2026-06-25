@@ -36,6 +36,23 @@ function screenArgs(args) {
   return [...baseArgs, ...args];
 }
 
+function terminalEnv() {
+  return {
+    ...process.env,
+    LANG: process.env.LANG && /UTF-8/i.test(process.env.LANG) ? process.env.LANG : UTF8_LOCALE,
+    LC_ALL: process.env.LC_ALL && /UTF-8/i.test(process.env.LC_ALL) ? process.env.LC_ALL : UTF8_LOCALE,
+    LC_CTYPE: process.env.LC_CTYPE && /UTF-8/i.test(process.env.LC_CTYPE) ? process.env.LC_CTYPE : UTF8_LOCALE,
+    TERM: 'xterm-256color'
+  };
+}
+
+function normalizeTerminalSize(cols, rows) {
+  return {
+    cols: Math.max(20, Math.min(300, Number(cols) || 120)),
+    rows: Math.max(6, Math.min(120, Number(rows) || 32))
+  };
+}
+
 function execScreen(args, options = {}) {
   return new Promise((resolve, reject) => {
     execFile(SCREEN_BIN, screenArgs(args), {
@@ -49,6 +66,55 @@ function execScreen(args, options = {}) {
         return;
       }
       resolve({ stdout, stderr, code: error ? error.code : 0 });
+    });
+  });
+}
+
+function createAttachedThenDetachSession(sessionName, size) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let detachTimer;
+    let timeoutTimer;
+
+    const term = pty.spawn(SCREEN_BIN, screenArgs(['-S', sessionName]), {
+      name: 'xterm-256color',
+      cols: size.cols,
+      rows: size.rows,
+      cwd: SHELL_HOME,
+      env: terminalEnv()
+    });
+
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(detachTimer);
+      clearTimeout(timeoutTimer);
+      if (error) {
+        try {
+          term.kill();
+        } catch {
+          // The process may already have exited.
+        }
+        reject(error);
+        return;
+      }
+      resolve();
+    };
+
+    detachTimer = setTimeout(() => {
+      term.write('\x01d');
+    }, 350);
+
+    timeoutTimer = setTimeout(() => {
+      finish(new Error('Timed out while creating screen session.'));
+    }, 5000);
+
+    term.onExit(({ exitCode, signal }) => {
+      if (exitCode === 0) {
+        finish();
+        return;
+      }
+      finish(new Error(`screen exited while creating session (${signal || exitCode}).`));
     });
   });
 }
@@ -291,11 +357,16 @@ function validateSessionName(sessionName) {
   }
 }
 
-async function createSession(name) {
+async function createSession(name, sizeInput = null) {
   const sessionName = name || `${SESSION_PREFIX}-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;
   validateSessionName(sessionName);
 
-  await execScreen(['-dmS', sessionName], { cwd: SHELL_HOME });
+  const size = sizeInput ? normalizeTerminalSize(sizeInput.cols, sizeInput.rows) : null;
+  if (size) {
+    await createAttachedThenDetachSession(sessionName, size);
+  } else {
+    await execScreen(['-dmS', sessionName], { cwd: SHELL_HOME });
+  }
   const sessions = await listSessions();
   const created = sessions.find((session) => session.name === sessionName || session.id.endsWith(`.${sessionName}`));
 
@@ -305,6 +376,17 @@ async function createSession(name) {
 
   rememberSession(created.id);
   return created;
+}
+
+async function resizeSessionWindow(value, cols, rows) {
+  const nextCols = Math.max(20, Math.min(300, Number(cols) || 120));
+  const nextRows = Math.max(6, Math.min(120, Number(rows) || 32));
+
+  try {
+    await execScreen(['-S', value, '-X', 'height', '-w', String(nextRows), String(nextCols)]);
+  } catch {
+    // The attach path also uses screen -A; sizing here is best-effort for first paint.
+  }
 }
 
 function resolveSession(sessions, value) {
@@ -358,13 +440,13 @@ async function renameSession(value, nextName) {
   return renamed;
 }
 
-async function selectDefaultSession() {
+async function selectDefaultSession(sizeInput = null) {
   let sessions = await listSessions();
 
   const { lastSessionId } = readState();
-  if (!lastSessionId) return createSession();
+  if (!lastSessionId) return createSession(null, sizeInput);
 
-  if (!sessions.length) return createSession();
+  if (!sessions.length) return createSession(null, sizeInput);
 
   const last = lastSessionId ? resolveSession(sessions, lastSessionId) : null;
   if (last && !last.attached) {
@@ -378,7 +460,7 @@ async function selectDefaultSession() {
     return detached;
   }
 
-  return createSession();
+  return createSession(null, sizeInput);
 }
 
 app.get('/api/health', (_req, res) => {
@@ -466,9 +548,10 @@ app.get('/api/sessions', async (_req, res, next) => {
   }
 });
 
-app.post('/api/sessions/default', async (_req, res, next) => {
+app.post('/api/sessions/default', async (req, res, next) => {
   try {
-    const session = await selectDefaultSession();
+    const session = await selectDefaultSession({ cols: req.body?.cols, rows: req.body?.rows });
+    await resizeSessionWindow(session.id, req.body?.cols, req.body?.rows);
     res.json({ session });
   } catch (error) {
     next(error);
@@ -477,7 +560,8 @@ app.post('/api/sessions/default', async (_req, res, next) => {
 
 app.post('/api/sessions', async (req, res, next) => {
   try {
-    const session = await createSession(req.body?.name);
+    const session = await createSession(req.body?.name, { cols: req.body?.cols, rows: req.body?.rows });
+    await resizeSessionWindow(session.id, req.body?.cols, req.body?.rows);
     res.status(201).json({ session });
   } catch (error) {
     next(error);
@@ -565,7 +649,7 @@ wss.on('connection', async (ws, _request, url) => {
       return;
     }
 
-    const args = screenArgs(force ? ['-D', '-r', session.id] : ['-r', session.id]);
+    const args = screenArgs(force ? ['-A', '-D', '-r', session.id] : ['-A', '-r', session.id]);
     rememberSession(session.id);
 
     term = pty.spawn(SCREEN_BIN, args, {
@@ -573,13 +657,7 @@ wss.on('connection', async (ws, _request, url) => {
       cols,
       rows,
       cwd: SHELL_HOME,
-      env: {
-        ...process.env,
-        LANG: process.env.LANG && /UTF-8/i.test(process.env.LANG) ? process.env.LANG : UTF8_LOCALE,
-        LC_ALL: process.env.LC_ALL && /UTF-8/i.test(process.env.LC_ALL) ? process.env.LC_ALL : UTF8_LOCALE,
-        LC_CTYPE: process.env.LC_CTYPE && /UTF-8/i.test(process.env.LC_CTYPE) ? process.env.LC_CTYPE : UTF8_LOCALE,
-        TERM: 'xterm-256color'
-      }
+      env: terminalEnv()
     });
 
     term.onData((data) => {
