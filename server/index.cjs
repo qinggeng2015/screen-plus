@@ -127,7 +127,6 @@ function webManifest(req) {
     scope,
     display: 'standalone',
     display_override: ['window-controls-overlay', 'standalone', 'browser'],
-    orientation: 'portrait',
     background_color: '#ffffff',
     theme_color: '#ffffff',
     categories: ['utilities', 'productivity', 'developer'],
