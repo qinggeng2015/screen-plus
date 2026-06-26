@@ -36,6 +36,7 @@ type AuthStatusResponse = {
 };
 
 type ThemeMode = 'dark' | 'light';
+type OrientationMode = 'portrait' | 'landscape';
 
 type ViewportMetrics = {
   top: number;
@@ -150,6 +151,10 @@ app.innerHTML = `
         <span class="quick-action-icon" id="themeIcon">☀</span>
         <span id="themeLabel">白天</span>
       </button>
+      <button class="quick-action" id="toggleOrientation" type="button" aria-pressed="false">
+        <span class="quick-action-icon" id="orientationIcon">↻</span>
+        <span id="orientationLabel">横屏</span>
+      </button>
     </nav>
 
     <button class="fab" id="fab" type="button" aria-label="打开快速操作" aria-expanded="false">
@@ -187,6 +192,9 @@ const scrim = document.querySelector<HTMLElement>('#scrim')!;
 const themeIcon = document.querySelector<HTMLSpanElement>('#themeIcon')!;
 const themeLabel = document.querySelector<HTMLSpanElement>('#themeLabel')!;
 const themeToggle = document.querySelector<HTMLButtonElement>('#toggleTheme')!;
+const orientationIcon = document.querySelector<HTMLSpanElement>('#orientationIcon')!;
+const orientationLabel = document.querySelector<HTMLSpanElement>('#orientationLabel')!;
+const orientationToggle = document.querySelector<HTMLButtonElement>('#toggleOrientation')!;
 const themeColorMeta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
 const appleStatusBarMeta = document.querySelector<HTMLMetaElement>('meta[name="apple-mobile-web-app-status-bar-style"]');
 const authGate = document.querySelector<HTMLElement>('#authGate')!;
@@ -301,6 +309,7 @@ let lastViewportMetrics: ViewportMetrics | null = null;
 let terminalViewport: HTMLElement | null = null;
 let terminalTouchTap: TerminalTouchTap | null = null;
 let terminalSuppressMouseFocusUntil = 0;
+let orientationMode: OrientationMode = 'portrait';
 
 function readStoredTheme(): ThemeMode {
   const saved = localStorage.getItem(themeStorageKey);
@@ -324,6 +333,32 @@ function applyTheme(mode: ThemeMode, persist = true) {
   if (persist) {
     localStorage.setItem(themeStorageKey, mode);
   }
+}
+
+function updateOrientationControl(mode: OrientationMode) {
+  orientationToggle.setAttribute('aria-pressed', String(mode === 'landscape'));
+  orientationIcon.textContent = mode === 'landscape' ? '↺' : '↻';
+  orientationLabel.textContent = mode === 'landscape' ? '竖屏' : '横屏';
+}
+
+async function applyOrientation(mode: OrientationMode) {
+  const orientation = screen.orientation;
+  if (orientation?.lock) {
+    try {
+      await orientation.lock(mode === 'landscape' ? 'landscape' : 'portrait');
+      orientationMode = mode;
+      updateOrientationControl(mode);
+    } catch {
+      updateOrientationControl(orientationMode);
+      updateSessionChip('当前浏览器不支持方向切换');
+    }
+  } else {
+    updateOrientationControl(orientationMode);
+    updateSessionChip('当前浏览器不支持方向切换');
+  }
+
+  syncViewportSize(true);
+  scheduleTerminalFit();
 }
 
 function fitTerminalNow() {
@@ -1123,6 +1158,12 @@ themeToggle.addEventListener('click', () => {
   applyTheme(nextMode);
 });
 
+orientationToggle.addEventListener('click', () => {
+  const nextMode: OrientationMode = orientationMode === 'landscape' ? 'portrait' : 'landscape';
+  setMenuOpen(false);
+  applyOrientation(nextMode);
+});
+
 document.querySelector('#closeDrawer')?.addEventListener('click', () => setDrawerOpen(false));
 document.querySelector('#refreshSessions')?.addEventListener('click', refreshSessions);
 document.querySelector('#newSession')?.addEventListener('click', createNewSession);
@@ -1227,6 +1268,7 @@ window.addEventListener('beforeunload', () => {
 });
 
 applyTheme(readStoredTheme(), false);
+updateOrientationControl(orientationMode);
 registerServiceWorker();
 syncViewportSize();
 loadAuthStatus().catch((error) => {
