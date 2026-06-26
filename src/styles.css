@@ -592,7 +592,7 @@ button {
     grid-row: 1;
   }
 
-  .terminal-keyboard button[data-key="dash"] {
+  .terminal-keyboard button[data-key="bottom"] {
     grid-column: 2;
     grid-row: 1;
   }

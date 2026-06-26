@@ -160,7 +160,7 @@ app.innerHTML = `
 
     <section class="terminal-keyboard" id="terminalKeyboard" aria-label="终端快捷键盘">
       <button data-key="escape" type="button">esc</button>
-      <button data-key="dash" type="button">-</button>
+      <button data-key="bottom" type="button" aria-label="滚动到底部">底部</button>
       <button data-key="shift" type="button" aria-pressed="false">shift</button>
       <button data-key="up" type="button" aria-label="上">↑</button>
       <button data-key="down" type="button" aria-label="下">↓</button>
@@ -1139,7 +1139,6 @@ keyboard.addEventListener('click', (event) => {
   const key = button.dataset.key;
   const keyMap: Record<string, string> = {
     escape: '\x1b',
-    dash: '-',
     up: '\x1b[A',
     down: '\x1b[B',
     right: '\x1b[C',
@@ -1164,6 +1163,16 @@ keyboard.addEventListener('click', (event) => {
   if (key === 'shift') {
     shiftActive = !shiftActive;
     updateModifierButtons();
+    terminal.focus();
+    return;
+  }
+
+  if (key === 'bottom') {
+    ctrlActive = false;
+    altActive = false;
+    shiftActive = false;
+    updateModifierButtons();
+    terminal.scrollToBottom();
     terminal.focus();
     return;
   }
