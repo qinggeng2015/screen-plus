@@ -350,13 +350,14 @@ button {
   grid-template-rows: auto auto 1fr;
   border-right: 1px solid var(--border-subtle);
   background: var(--surface);
-  box-shadow: 24px 0 54px var(--shadow-strong);
+  box-shadow: none;
   transform: translateX(-102%);
   transition: transform 190ms ease;
   backdrop-filter: blur(22px);
 }
 
 .app-shell[data-drawer-open="true"] .session-drawer {
+  box-shadow: 24px 0 54px var(--shadow-strong);
   transform: translateX(0);
 }
 
@@ -543,7 +544,7 @@ button {
   padding: 7px max(7px, env(safe-area-inset-right)) calc(7px + env(safe-area-inset-bottom)) max(7px, env(safe-area-inset-left));
   border-top: 0;
   background: var(--surface);
-  box-shadow: 0 -1px 0 var(--surface), 0 -18px 44px var(--shadow-strong);
+  box-shadow: none;
   transform: translateY(105%);
   transition: transform 180ms ease;
   backdrop-filter: blur(20px);
