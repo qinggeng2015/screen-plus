@@ -694,6 +694,33 @@ function sendInput(data: string) {
   terminal.focus();
 }
 
+function isEscapeKey(event: KeyboardEvent) {
+  return event.key === 'Escape' || event.key === 'Esc' || event.code === 'Escape' || event.keyCode === 27;
+}
+
+function isAppEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (terminalHost.contains(target)) return false;
+  if (target.closest('#authGate[data-visible="true"]')) return true;
+  if (target.closest('input, textarea, select')) return true;
+  return target.isContentEditable;
+}
+
+function handleEscapeKeyDown(event: KeyboardEvent) {
+  if (!isEscapeKey(event)) return true;
+  if (event.type !== 'keydown') return true;
+
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation();
+
+  if (terminalStarted && authGate.dataset.visible !== 'true' && !isAppEditableTarget(event.target)) {
+    sendInput(event.altKey ? '\x1b\x1b' : '\x1b');
+  }
+
+  return false;
+}
+
 function updateSessionChip(message?: string) {
   if (message) {
     sessionChip.textContent = message;
@@ -1204,6 +1231,8 @@ document.addEventListener('visibilitychange', () => {
     ensureActiveConnection('resume');
   }
 });
+
+document.addEventListener('keydown', handleEscapeKeyDown, { capture: true });
 
 window.addEventListener('pageshow', () => {
   syncViewportSize();
