@@ -38,11 +38,14 @@ ENV NODE_ENV=production \
   SCREEN_PLUS_HOME=/data/home \
   SHELL=/usr/bin/zsh \
   ZDOTDIR=/data/zsh \
-  LANG=C.UTF-8 \
-  LC_ALL=C.UTF-8
+  LANG=en_US.UTF-8 \
+  LC_CTYPE=en_US.UTF-8 \
+  SCREEN_PLUS_LOCALE=en_US.UTF-8
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends screen tini ca-certificates openssh-client zsh zsh-autosuggestions zsh-syntax-highlighting \
+  && apt-get install -y --no-install-recommends screen tini ca-certificates locales openssh-client zsh zsh-autosuggestions zsh-syntax-highlighting \
+  && sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen \
+  && locale-gen en_US.UTF-8 \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /data/home /data/zsh
 

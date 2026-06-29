@@ -83,7 +83,7 @@ docker run -d \
 - `SCREEN_PLUS_PREFIX`: 自动创建会话名前缀，默认 `sp`
 - `SCREEN_PLUS_STATE_DIR`: 最近使用会话状态目录，默认项目内 `.screen-plus`
 - `SCREEN_PLUS_CONFIG`: 认证配置文件路径，默认 `.screen-plus/config.json`，Docker 中默认 `/data/config.json`
-- `SCREEN_PLUS_LOCALE`: 终端 UTF-8 locale，默认跟随环境变量，容器中默认 `C.UTF-8`
+- `SCREEN_PLUS_LOCALE`: 终端 UTF-8 locale，默认跟随环境变量，容器中默认 `en_US.UTF-8`
 - `SCREEN_PLUS_SHELL`: screen 会话使用的 shell，Docker 中默认 `/usr/bin/zsh`
 - `SCREEN_PLUS_HOME`: 新建 screen 会话和 attach 进程的默认目录，默认使用当前用户 HOME
 - `SHELL`: screen 会话默认 shell，Docker 中默认 `/usr/bin/zsh`
@@ -96,9 +96,16 @@ termcapinfo xterm* ti@:te@
 termcapinfo xterm-256color* ti@:te@
 defscrollback 10000
 defutf8 on
+utf8 on on
 ```
 
-这类配置对新创建的 screen 会话生效；已有会话需要关闭后重建。
+这类配置和 locale 环境对新创建的 screen 会话生效；已有会话里的 shell 环境不会在重新连接时自动改变，需要关闭后重建。乱码排查时，可以先在 Screen Plus 终端里执行：
+
+```bash
+locale
+```
+
+正常情况下至少 `LANG` 和 `LC_CTYPE` 应该是 UTF-8，例如 `en_US.UTF-8`。如果先进入 Screen Plus 再 `ssh` 到其他服务器，SSH 默认可能会把本地 locale 发送到远端；因此 Screen Plus 会清理非 UTF-8 的 `LC_*` 并只传递 UTF-8 的字符分类环境，避免远端 shell 落回 ASCII/C locale。
 
 ## 镜像发布
 

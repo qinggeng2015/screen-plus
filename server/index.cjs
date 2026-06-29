@@ -8,6 +8,16 @@ const express = require('express');
 const pty = require('node-pty');
 const { WebSocketServer } = require('ws');
 
+function isUtf8Locale(value) {
+  return /utf-?8/i.test(String(value || ''));
+}
+
+function usableUtf8Locale(value) {
+  const locale = String(value || '').trim();
+  if (!isUtf8Locale(locale)) return '';
+  return /^utf-?8$/i.test(locale) ? '' : locale;
+}
+
 function normalizeBasePath(value) {
   const trimmed = String(value || '').trim();
   if (!trimmed || trimmed === '/') return '';
@@ -34,7 +44,10 @@ const AUTH_COOKIE = 'screen_plus_session';
 const AUTH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PASSWORD_KEY_LENGTH = 64;
 const UTF8_LOCALE = process.env.SCREEN_PLUS_LOCALE
-  || (process.env.LANG && /UTF-8/i.test(process.env.LANG) ? process.env.LANG : 'C.UTF-8');
+  || usableUtf8Locale(process.env.LANG)
+  || usableUtf8Locale(process.env.LC_CTYPE)
+  || usableUtf8Locale(process.env.LC_ALL)
+  || 'C.UTF-8';
 const SHELL_HOME = process.env.SCREEN_PLUS_HOME || process.env.HOME || os.homedir() || process.cwd();
 
 const app = express();
@@ -213,11 +226,18 @@ function screenArgs(args) {
 }
 
 function terminalEnv() {
+  const env = { ...process.env };
+
+  for (const key of Object.keys(env)) {
+    if (key === 'LC_ALL' || key.startsWith('LC_')) {
+      delete env[key];
+    }
+  }
+
   return {
-    ...process.env,
-    LANG: process.env.LANG && /UTF-8/i.test(process.env.LANG) ? process.env.LANG : UTF8_LOCALE,
-    LC_ALL: process.env.LC_ALL && /UTF-8/i.test(process.env.LC_ALL) ? process.env.LC_ALL : UTF8_LOCALE,
-    LC_CTYPE: process.env.LC_CTYPE && /UTF-8/i.test(process.env.LC_CTYPE) ? process.env.LC_CTYPE : UTF8_LOCALE,
+    ...env,
+    LANG: UTF8_LOCALE,
+    LC_CTYPE: UTF8_LOCALE,
     TERM: 'xterm-256color'
   };
 }
@@ -233,7 +253,8 @@ function execScreen(args, options = {}) {
   return new Promise((resolve, reject) => {
     execFile(SCREEN_BIN, screenArgs(args), {
       timeout: 10000,
-      cwd: options.cwd || process.cwd()
+      cwd: options.cwd || process.cwd(),
+      env: terminalEnv()
     }, (error, stdout, stderr) => {
       if (error && error.code !== 1) {
         error.stdout = stdout;

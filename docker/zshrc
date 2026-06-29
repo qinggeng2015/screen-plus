@@ -1,6 +1,9 @@
 export HISTFILE="${ZDOTDIR:-$HOME}/.zsh_history"
 export HISTSIZE=50000
 export SAVEHIST=50000
+export LANG="${LANG:-${SCREEN_PLUS_LOCALE:-en_US.UTF-8}}"
+export LC_CTYPE="${LC_CTYPE:-$LANG}"
+unset LC_ALL
 
 setopt append_history
 setopt extended_history
