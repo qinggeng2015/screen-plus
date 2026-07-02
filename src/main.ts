@@ -298,9 +298,6 @@ let fabDragOffset = { x: 0, y: 0 };
 let viewportSyncFrame = 0;
 let pendingViewportForceFit = false;
 let lastViewportMetrics: ViewportMetrics | null = null;
-let lastSentTerminalSize: { cols: number; rows: number } | null = null;
-let terminalOutputFrame = 0;
-let pendingTerminalOutput: Array<string | Uint8Array> = [];
 let terminalViewport: HTMLElement | null = null;
 let terminalTouchTap: TerminalTouchTap | null = null;
 let terminalSuppressMouseFocusUntil = 0;
@@ -501,46 +498,11 @@ function syncViewportSize(forceFit = false) {
 
 function sendResize() {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  const cols = terminal.cols;
-  const rows = terminal.rows;
-  if (lastSentTerminalSize?.cols === cols && lastSentTerminalSize.rows === rows) return;
-  lastSentTerminalSize = { cols, rows };
   socket.send(JSON.stringify({
     type: 'resize',
-    cols,
-    rows
+    cols: terminal.cols,
+    rows: terminal.rows
   }));
-}
-
-function flushTerminalOutput() {
-  terminalOutputFrame = 0;
-  if (!pendingTerminalOutput.length) return;
-
-  const output = pendingTerminalOutput;
-  pendingTerminalOutput = [];
-
-  const allText = output.every((chunk) => typeof chunk === 'string');
-  if (allText) {
-    terminal.write((output as string[]).join(''));
-    return;
-  }
-
-  for (const chunk of output) {
-    terminal.write(chunk);
-  }
-}
-
-function queueTerminalOutput(data: string | Uint8Array) {
-  pendingTerminalOutput.push(data);
-  if (terminalOutputFrame) return;
-  terminalOutputFrame = window.requestAnimationFrame(flushTerminalOutput);
-}
-
-function clearPendingTerminalOutput() {
-  pendingTerminalOutput = [];
-  if (!terminalOutputFrame) return;
-  window.cancelAnimationFrame(terminalOutputFrame);
-  terminalOutputFrame = 0;
 }
 
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
@@ -616,7 +578,6 @@ async function submitAuth() {
 
 function requireLogin(message = '需要重新登录', setupRequired = false) {
   terminalStarted = false;
-  clearPendingTerminalOutput();
   if (socket) {
     socket.onclose = null;
     socket.close();
@@ -901,8 +862,6 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
   reconnecting = true;
   reconnectAfterResume = false;
   lastSocketActivityAt = Date.now();
-  lastSentTerminalSize = null;
-  clearPendingTerminalOutput();
   updateSessionChip(force && session.attached ? `正在接管 ${session.name}` : `正在打开 ${session.name}`);
   renderSessions();
 
@@ -915,11 +874,9 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
   if (options.clear !== false) resetTerminalView();
   fitTerminalNow();
 
-  const connection = new WebSocket(websocketUrl(session, force));
-  socket = connection;
+  socket = new WebSocket(websocketUrl(session, force));
 
-  connection.addEventListener('open', () => {
-    if (socket !== connection) return;
+  socket.addEventListener('open', () => {
     reconnecting = false;
     lastSocketActivityAt = Date.now();
     updateSessionChip();
@@ -930,31 +887,26 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
     refreshSessions();
   });
 
-  connection.addEventListener('message', (event) => {
-    if (socket !== connection) return;
+  socket.addEventListener('message', (event) => {
     lastSocketActivityAt = Date.now();
     if (typeof event.data === 'string') {
-      queueTerminalOutput(event.data);
+      terminal.write(event.data);
       return;
     }
 
     event.data.arrayBuffer().then((buffer: ArrayBuffer) => {
-      queueTerminalOutput(new Uint8Array(buffer));
+      terminal.write(new Uint8Array(buffer));
     });
   });
 
-  connection.addEventListener('close', () => {
-    if (socket !== connection) return;
-    clearPendingTerminalOutput();
+  socket.addEventListener('close', () => {
     if (reconnecting) return;
     lastSocketActivityAt = 0;
     updateSessionChip('连接已断开');
     refreshSessions();
   });
 
-  connection.addEventListener('error', () => {
-    if (socket !== connection) return;
-    clearPendingTerminalOutput();
+  socket.addEventListener('error', () => {
     lastSocketActivityAt = 0;
     updateSessionChip('连接失败');
   });
@@ -1002,7 +954,6 @@ async function closeSession(session: ScreenSession) {
     const closingActiveSession = activeSession?.id === session.id;
     const previousSessions = sessions.slice();
     if (closingActiveSession) {
-      clearPendingTerminalOutput();
       socket?.close();
       socket = null;
       activeSession = null;
@@ -1309,7 +1260,6 @@ connectionHealthTimer = window.setInterval(() => {
 window.addEventListener('beforeunload', () => {
   window.clearInterval(sessionRefreshTimer);
   window.clearInterval(connectionHealthTimer);
-  clearPendingTerminalOutput();
   socket?.close();
 });
 
