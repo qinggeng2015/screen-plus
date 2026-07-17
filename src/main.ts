@@ -251,7 +251,7 @@ const appThemeColors: Record<ThemeMode, string> = {
 
 const terminal = new Terminal({
   cursorBlink: true,
-  convertEol: true,
+  convertEol: false,
   fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
   fontSize: 14,
   lineHeight: 1.18,
@@ -273,7 +273,7 @@ const fabPositionStorageKey = 'screen-plus:floating-button-position';
 const themeStorageKey = 'screen-plus:theme';
 const fabSize = 58;
 const fabGap = 18;
-const socketIdleReconnectMs = 90_000;
+const socketHeartbeatTimeoutMs = 30_000;
 const viewportMetricTolerance = 1;
 const terminalTapMoveTolerance = 8;
 const terminalTouchScrollSuppressMouseMs = 700;
@@ -287,7 +287,6 @@ let shiftActive = false;
 let reconnecting = false;
 let sessionRefreshTimer = 0;
 let connectionHealthTimer = 0;
-let lastSocketActivityAt = 0;
 let reconnectAfterResume = false;
 let authMode: 'setup' | 'login' = 'login';
 let terminalStarted = false;
@@ -298,6 +297,13 @@ let fabDragOffset = { x: 0, y: 0 };
 let viewportSyncFrame = 0;
 let pendingViewportForceFit = false;
 let lastViewportMetrics: ViewportMetrics | null = null;
+let lastSentTerminalSize: { connection: WebSocket; cols: number; rows: number } | null = null;
+let pendingSocketHeartbeat: { connection: WebSocket; id: string; sentAt: number } | null = null;
+const knownSocketHeartbeatIds = new Set<string>();
+let terminalOutputFrame = 0;
+let terminalOutputTimer = 0;
+let pendingTerminalOutput: Array<string | Uint8Array> = [];
+let pendingTerminalOutputBytes = 0;
 let terminalViewport: HTMLElement | null = null;
 let terminalTouchTap: TerminalTouchTap | null = null;
 let terminalSuppressMouseFocusUntil = 0;
@@ -497,12 +503,122 @@ function syncViewportSize(forceFit = false) {
 }
 
 function sendResize() {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  socket.send(JSON.stringify({
+  const connection = socket;
+  if (!connection || connection.readyState !== WebSocket.OPEN) return;
+
+  const cols = terminal.cols;
+  const rows = terminal.rows;
+  if (lastSentTerminalSize?.connection === connection
+    && lastSentTerminalSize.cols === cols
+    && lastSentTerminalSize.rows === rows) return;
+
+  connection.send(JSON.stringify({
     type: 'resize',
-    cols: terminal.cols,
-    rows: terminal.rows
+    cols,
+    rows
   }));
+  lastSentTerminalSize = { connection, cols, rows };
+}
+
+function clearSocketHeartbeat(connection?: WebSocket) {
+  if (!connection || pendingSocketHeartbeat?.connection === connection) {
+    pendingSocketHeartbeat = null;
+  }
+}
+
+function resetSocketHeartbeat() {
+  pendingSocketHeartbeat = null;
+  knownSocketHeartbeatIds.clear();
+}
+
+function sendSocketHeartbeat(connection: WebSocket) {
+  if (connection.readyState !== WebSocket.OPEN) return;
+  if (pendingSocketHeartbeat?.connection === connection) return;
+
+  const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  pendingSocketHeartbeat = { connection, id, sentAt: Date.now() };
+  knownSocketHeartbeatIds.add(id);
+  if (knownSocketHeartbeatIds.size > 8) {
+    knownSocketHeartbeatIds.delete(knownSocketHeartbeatIds.values().next().value as string);
+  }
+  try {
+    connection.send(JSON.stringify({ type: 'ping', id }));
+  } catch {
+    clearSocketHeartbeat(connection);
+    connection.close();
+  }
+}
+
+function consumeSocketHeartbeat(connection: WebSocket, data: string) {
+  try {
+    const payload = JSON.parse(data) as { type?: unknown; id?: unknown };
+    if (payload.type !== 'pong' || typeof payload.id !== 'string') return false;
+    if (!knownSocketHeartbeatIds.delete(payload.id)) return false;
+    if (pendingSocketHeartbeat?.connection === connection && pendingSocketHeartbeat.id === payload.id) {
+      clearSocketHeartbeat(connection);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function flushTerminalOutput() {
+  if (terminalOutputFrame) {
+    window.cancelAnimationFrame(terminalOutputFrame);
+    terminalOutputFrame = 0;
+  }
+  if (terminalOutputTimer) {
+    window.clearTimeout(terminalOutputTimer);
+    terminalOutputTimer = 0;
+  }
+  if (!pendingTerminalOutput.length) return;
+
+  const output = pendingTerminalOutput;
+  pendingTerminalOutput = [];
+  pendingTerminalOutputBytes = 0;
+  let text = '';
+
+  for (const chunk of output) {
+    if (typeof chunk === 'string') {
+      text += chunk;
+      continue;
+    }
+
+    if (text) {
+      terminal.write(text);
+      text = '';
+    }
+    terminal.write(chunk);
+  }
+
+  if (text) terminal.write(text);
+}
+
+function queueTerminalOutput(connection: WebSocket, data: string | Uint8Array) {
+  if (socket !== connection) return;
+  pendingTerminalOutput.push(data);
+  pendingTerminalOutputBytes += typeof data === 'string' ? data.length * 3 : data.byteLength;
+  if (pendingTerminalOutputBytes >= 256 * 1024) {
+    flushTerminalOutput();
+    return;
+  }
+  if (terminalOutputFrame) return;
+  terminalOutputFrame = window.requestAnimationFrame(flushTerminalOutput);
+  terminalOutputTimer = window.setTimeout(flushTerminalOutput, 100);
+}
+
+function discardPendingTerminalOutput() {
+  pendingTerminalOutput = [];
+  pendingTerminalOutputBytes = 0;
+  if (terminalOutputFrame) {
+    window.cancelAnimationFrame(terminalOutputFrame);
+    terminalOutputFrame = 0;
+  }
+  if (terminalOutputTimer) {
+    window.clearTimeout(terminalOutputTimer);
+    terminalOutputTimer = 0;
+  }
 }
 
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
@@ -578,11 +694,12 @@ async function submitAuth() {
 
 function requireLogin(message = '需要重新登录', setupRequired = false) {
   terminalStarted = false;
-  if (socket) {
-    socket.onclose = null;
-    socket.close();
-    socket = null;
-  }
+  discardPendingTerminalOutput();
+  const connection = socket;
+  socket = null;
+  lastSentTerminalSize = null;
+  resetSocketHeartbeat();
+  connection?.close();
   activeSession = null;
   renderAuthGate({
     authenticated: false,
@@ -747,6 +864,7 @@ function renderSessions() {
     const item = document.createElement('article');
     item.className = 'session-item';
     item.dataset.active = String(activeSession?.id === session.id);
+    const unavailable = session.status === 'dead' || session.status === 'unknown';
 
     const title = document.createElement('button');
     title.type = 'button';
@@ -755,34 +873,55 @@ function renderSessions() {
       <span class="session-name">${session.name}</span>
       <span class="session-id">${session.id}</span>
     `;
-    title.addEventListener('click', () => {
-      connectSession(session, session.attached);
-      setDrawerOpen(false);
-    });
+    title.disabled = unavailable;
+    if (unavailable) {
+      title.title = session.status === 'dead'
+        ? '会话已失效，请使用关闭按钮清理'
+        : '无法识别会话状态，为避免误操作已禁止打开';
+    } else {
+      title.addEventListener('click', () => {
+        connectSession(session, session.attached);
+        setDrawerOpen(false);
+      });
+    }
 
     const badge = document.createElement('span');
     badge.className = `session-badge session-badge-${session.status}`;
-    badge.textContent = session.attached ? '占用' : session.status === 'dead' ? '失效' : '空闲';
+    badge.textContent = session.attached
+      ? '占用'
+      : session.status === 'dead'
+        ? '失效'
+        : session.status === 'unknown'
+          ? '异常'
+          : '空闲';
 
     const renameButton = document.createElement('button');
     renameButton.type = 'button';
     renameButton.className = 'session-tool session-rename';
     renameButton.setAttribute('aria-label', `重命名会话 ${session.name}`);
     renameButton.textContent = '✎';
-    renameButton.addEventListener('click', (event) => {
-      event.stopPropagation();
-      renameSession(session);
-    });
+    renameButton.disabled = unavailable;
+    if (!unavailable) {
+      renameButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        renameSession(session);
+      });
+    }
 
     const closeButton = document.createElement('button');
     closeButton.type = 'button';
     closeButton.className = 'session-tool session-close';
     closeButton.setAttribute('aria-label', `关闭会话 ${session.name}`);
     closeButton.textContent = '×';
-    closeButton.addEventListener('click', (event) => {
-      event.stopPropagation();
-      closeSession(session);
-    });
+    closeButton.disabled = session.status === 'unknown';
+    if (session.status === 'unknown') {
+      closeButton.title = '无法识别会话状态，为避免误操作已禁止关闭';
+    } else {
+      closeButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        closeSession(session);
+      });
+    }
 
     item.append(title, badge, renameButton, closeButton);
     return item;
@@ -820,7 +959,12 @@ function selectFallbackSession(closedSessionId: string, previousSessions = sessi
   const freshById = new Map(sessions.map((session) => [session.id, session]));
   const candidates = orderedCandidates
     .map((session) => freshById.get(session.id))
-    .filter((session): session is ScreenSession => Boolean(session) && session.id !== closedSessionId && session.status !== 'dead');
+    .filter((session): session is ScreenSession => {
+      if (!session) return false;
+      return session.id !== closedSessionId
+        && session.status !== 'dead'
+        && session.status !== 'unknown';
+    });
 
   return candidates.find((session) => !session.attached)
     || candidates[0]
@@ -843,9 +987,16 @@ function ensureActiveConnection(reason = 'resume') {
   if (document.visibilityState === 'hidden') return;
   if (reconnecting || reconnectAfterResume) return;
 
-  const stale = lastSocketActivityAt > 0 && Date.now() - lastSocketActivityAt > socketIdleReconnectMs;
-  const closed = !socket || socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED;
-  if (!closed && socket.readyState === WebSocket.OPEN && !stale) return;
+  const connection = socket;
+  const heartbeatTimedOut = pendingSocketHeartbeat?.connection === connection
+    && Date.now() - pendingSocketHeartbeat.sentAt >= socketHeartbeatTimeoutMs;
+  const closed = !connection
+    || connection.readyState === WebSocket.CLOSING
+    || connection.readyState === WebSocket.CLOSED;
+  if (!closed && connection.readyState === WebSocket.OPEN && !heartbeatTimedOut) {
+    sendSocketHeartbeat(connection);
+    return;
+  }
 
   reconnectAfterResume = true;
   const session = activeSession;
@@ -858,56 +1009,74 @@ function ensureActiveConnection(reason = 'resume') {
 }
 
 function connectSession(session: ScreenSession, force = false, options: { clear?: boolean } = {}) {
+  const preserveTerminalOutput = options.clear === false && activeSession?.id === session.id;
+  if (preserveTerminalOutput) {
+    flushTerminalOutput();
+  } else {
+    discardPendingTerminalOutput();
+  }
+
   activeSession = session;
   reconnecting = true;
   reconnectAfterResume = false;
-  lastSocketActivityAt = Date.now();
   updateSessionChip(force && session.attached ? `正在接管 ${session.name}` : `正在打开 ${session.name}`);
   renderSessions();
 
-  if (socket) {
-    socket.onclose = null;
-    socket.close();
-    socket = null;
-  }
+  const previousConnection = socket;
+  socket = null;
+  lastSentTerminalSize = null;
+  resetSocketHeartbeat();
+  previousConnection?.close();
 
   if (options.clear !== false) resetTerminalView();
   fitTerminalNow();
 
-  socket = new WebSocket(websocketUrl(session, force));
+  const connection = new WebSocket(websocketUrl(session, force));
+  connection.binaryType = 'arraybuffer';
+  socket = connection;
 
-  socket.addEventListener('open', () => {
+  connection.addEventListener('open', () => {
+    if (socket !== connection) return;
     reconnecting = false;
-    lastSocketActivityAt = Date.now();
     updateSessionChip();
     fitTerminalNow();
-    window.setTimeout(fitTerminalNow, 120);
-    window.setTimeout(fitTerminalNow, 400);
+    window.setTimeout(() => {
+      if (socket === connection) fitTerminalNow();
+    }, 120);
+    window.setTimeout(() => {
+      if (socket === connection) fitTerminalNow();
+    }, 400);
     terminal.focus();
     refreshSessions();
   });
 
-  socket.addEventListener('message', (event) => {
-    lastSocketActivityAt = Date.now();
+  connection.addEventListener('message', (event) => {
+    if (socket !== connection) return;
     if (typeof event.data === 'string') {
-      terminal.write(event.data);
+      if (consumeSocketHeartbeat(connection, event.data)) return;
+      queueTerminalOutput(connection, event.data);
       return;
     }
 
-    event.data.arrayBuffer().then((buffer: ArrayBuffer) => {
-      terminal.write(new Uint8Array(buffer));
-    });
+    queueTerminalOutput(connection, new Uint8Array(event.data as ArrayBuffer));
   });
 
-  socket.addEventListener('close', () => {
-    if (reconnecting) return;
-    lastSocketActivityAt = 0;
+  connection.addEventListener('close', () => {
+    if (socket !== connection) return;
+    flushTerminalOutput();
+    socket = null;
+    lastSentTerminalSize = null;
+    clearSocketHeartbeat(connection);
+    reconnecting = false;
     updateSessionChip('连接已断开');
     refreshSessions();
   });
 
-  socket.addEventListener('error', () => {
-    lastSocketActivityAt = 0;
+  connection.addEventListener('error', () => {
+    if (socket !== connection) return;
+    flushTerminalOutput();
+    clearSocketHeartbeat(connection);
+    reconnecting = false;
     updateSessionChip('连接失败');
   });
 }
@@ -946,7 +1115,10 @@ async function createNewSession() {
 }
 
 async function closeSession(session: ScreenSession) {
-  const confirmed = window.confirm(`关闭 screen 会话「${session.name}」？\\n会话中的进程会被终止。`);
+  const confirmation = session.status === 'dead'
+    ? `清理失效的 screen 会话「${session.name}」？\\n该会话进程已经不存在，只会移除残留 socket。`
+    : `关闭 screen 会话「${session.name}」？\\n会话中的进程会被终止。`;
+  const confirmed = window.confirm(confirmation);
   if (!confirmed) return;
 
   try {
@@ -954,8 +1126,12 @@ async function closeSession(session: ScreenSession) {
     const closingActiveSession = activeSession?.id === session.id;
     const previousSessions = sessions.slice();
     if (closingActiveSession) {
-      socket?.close();
+      discardPendingTerminalOutput();
+      const connection = socket;
       socket = null;
+      lastSentTerminalSize = null;
+      resetSocketHeartbeat();
+      connection?.close();
       activeSession = null;
       updateSessionChip('正在关闭当前会话');
     }
@@ -1229,6 +1405,8 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     syncViewportSize();
     ensureActiveConnection('resume');
+  } else {
+    clearSocketHeartbeat(socket || undefined);
   }
 });
 
@@ -1260,6 +1438,7 @@ connectionHealthTimer = window.setInterval(() => {
 window.addEventListener('beforeunload', () => {
   window.clearInterval(sessionRefreshTimer);
   window.clearInterval(connectionHealthTimer);
+  discardPendingTerminalOutput();
   socket?.close();
 });
 

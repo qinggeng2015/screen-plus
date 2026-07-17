@@ -43,6 +43,7 @@ const BASE_PATH = normalizeBasePath(process.env.SCREEN_PLUS_BASE_PATH);
 const AUTH_COOKIE = 'screen_plus_session';
 const AUTH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PASSWORD_KEY_LENGTH = 64;
+const REMOVED_SESSION_TTL_MS = 60 * 1000;
 const UTF8_LOCALE = process.env.SCREEN_PLUS_LOCALE
   || usableUtf8Locale(process.env.LANG)
   || usableUtf8Locale(process.env.LC_CTYPE)
@@ -256,7 +257,8 @@ function execScreen(args, options = {}) {
       cwd: options.cwd || process.cwd(),
       env: terminalEnv()
     }, (error, stdout, stderr) => {
-      if (error && error.code !== 1) {
+      const allowedExitCodes = options.allowedExitCodes || [];
+      if (error && !allowedExitCodes.includes(error.code)) {
         error.stdout = stdout;
         error.stderr = stderr;
         reject(error);
@@ -515,6 +517,32 @@ function forgetSession(sessionId) {
   });
 }
 
+const recentlyRemovedSessions = new Map();
+const deadSessionCleanupPromises = new Map();
+
+function pruneRecentlyRemovedSessions() {
+  const cutoff = Date.now() - REMOVED_SESSION_TTL_MS;
+  for (const [id, entry] of recentlyRemovedSessions) {
+    if (entry.removedAt < cutoff) recentlyRemovedSessions.delete(id);
+  }
+}
+
+function rememberRemovedSession(session) {
+  pruneRecentlyRemovedSessions();
+  recentlyRemovedSessions.set(session.id, {
+    session,
+    removedAt: Date.now()
+  });
+}
+
+function resolveRecentlyRemovedSession(value) {
+  pruneRecentlyRemovedSessions();
+  for (const { session } of recentlyRemovedSessions.values()) {
+    if (session.id === value || session.name === value) return session;
+  }
+  return null;
+}
+
 function parseScreenList(output) {
   return output
     .split(/\r?\n/)
@@ -524,8 +552,25 @@ function parseScreenList(output) {
       if (!match) return null;
 
       const [, id, detail] = match;
-      const statusMatch = detail.match(/\((Attached|Detached|Multi|Dead)\)\s*$/i);
-      const status = statusMatch ? statusMatch[1].toLowerCase() : 'unknown';
+      const statusDetail = detail.match(/\(([^()]*)\)\s*$/)?.[1].trim().toLowerCase() || '';
+      let status = 'unknown';
+      let attached = false;
+
+      if (statusDetail === 'attached') {
+        status = 'attached';
+        attached = true;
+      } else if (statusDetail === 'detached') {
+        status = 'detached';
+      } else if (/^multi(?:,\s*(?:attached|detached))?$/.test(statusDetail)) {
+        status = 'multi';
+        attached = !/,\s*detached$/.test(statusDetail);
+      } else if (/^dead(?:\s+\?+)?$/.test(statusDetail)) {
+        status = 'dead';
+      } else if (statusDetail === 'remote or dead') {
+        // It may be a live session on another host sharing the socket directory.
+        status = 'unknown';
+      }
+
       const dateMatch = detail.match(/\((\d{1,4}[/-]\d{1,2}[/-]\d{1,4}[^)]*)\)/);
       const name = id.includes('.') ? id.slice(id.indexOf('.') + 1) : id;
 
@@ -533,7 +578,7 @@ function parseScreenList(output) {
         id,
         name,
         status,
-        attached: status === 'attached' || status === 'multi',
+        attached,
         lastSeen: dateMatch ? dateMatch[1] : null,
         managed: name === SESSION_PREFIX || name.startsWith(`${SESSION_PREFIX}-`)
       };
@@ -541,9 +586,65 @@ function parseScreenList(output) {
     .filter(Boolean);
 }
 
+async function readScreenSessions() {
+  const result = await execScreen(['-ls'], { allowedExitCodes: [1] });
+  const output = `${result.stdout}\n${result.stderr}`;
+  const sessions = parseScreenList(output);
+
+  if (result.code !== 0 && !sessions.length && !/no sockets found/i.test(output)) {
+    const error = new Error(output.trim() || `screen exited with code ${result.code}.`);
+    error.stdout = result.stdout;
+    error.stderr = result.stderr;
+    throw error;
+  }
+
+  return sessions;
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function findSessionAfterCommand(sessionId) {
+  const maxAttempts = 5;
+  let session = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const sessions = await readScreenSessions();
+    session = sessions.find((item) => item.id === sessionId) || null;
+    if (!session) return null;
+    if (attempt < maxAttempts - 1) await wait(50);
+  }
+
+  return session;
+}
+
+function removeDeadScreenSession(session) {
+  let cleanup = deadSessionCleanupPromises.get(session.id);
+  if (!cleanup) {
+    cleanup = (async () => {
+      await execScreen(['-wipe', session.id], { allowedExitCodes: [1] });
+
+      const remaining = await findSessionAfterCommand(session.id);
+      if (remaining) {
+        const error = new Error(`Dead screen session could not be removed: ${session.id}`);
+        error.status = 409;
+        throw error;
+      }
+
+      rememberRemovedSession(session);
+      forgetSession(session.id);
+      return session;
+    })()
+      .finally(() => {
+        deadSessionCleanupPromises.delete(session.id);
+      });
+    deadSessionCleanupPromises.set(session.id, cleanup);
+  }
+  return cleanup;
+}
+
 async function listSessions() {
-  const { stdout, stderr } = await execScreen(['-ls']);
-  return parseScreenList(`${stdout}\n${stderr}`);
+  return readScreenSessions();
 }
 
 function validateSessionName(sessionName) {
@@ -565,7 +666,9 @@ async function createSession(name, sizeInput = null) {
     await execScreen(['-dmS', sessionName], { cwd: SHELL_HOME });
   }
   const sessions = await listSessions();
-  const created = sessions.find((session) => session.name === sessionName || session.id.endsWith(`.${sessionName}`));
+  const created = sessions.find((session) => (
+    session.name === sessionName || session.id.endsWith(`.${sessionName}`)
+  ) && isKnownLiveSession(session));
 
   if (!created) {
     throw new Error('screen reported success, but the created session was not found.');
@@ -590,17 +693,56 @@ function resolveSession(sessions, value) {
   return sessions.find((session) => session.id === value || session.name === value);
 }
 
+function isKnownLiveSession(session) {
+  return session.status === 'attached' || session.status === 'detached' || session.status === 'multi';
+}
+
+function isExplicitlyDetachedSession(session) {
+  return session.status === 'detached' || (session.status === 'multi' && !session.attached);
+}
+
 async function closeSession(value) {
-  const sessions = await listSessions();
+  const sessions = await readScreenSessions();
   const session = resolveSession(sessions, value);
 
   if (!session) {
+    const removedSession = resolveRecentlyRemovedSession(value);
+    if (removedSession) {
+      forgetSession(removedSession.id);
+      return removedSession;
+    }
+
     const error = new Error('Session not found.');
     error.status = 404;
     throw error;
   }
 
-  await execScreen(['-S', session.id, '-X', 'quit']);
+  if (session.status === 'dead') {
+    return removeDeadScreenSession(session);
+  }
+
+  if (!isKnownLiveSession(session)) {
+    const error = new Error(`Screen session has an unsupported status and cannot be closed safely: ${session.id}`);
+    error.status = 409;
+    throw error;
+  }
+
+  const result = await execScreen(['-S', session.id, '-X', 'quit'], { allowedExitCodes: [1] });
+  const currentSession = await findSessionAfterCommand(session.id);
+
+  if (currentSession?.status === 'dead') {
+    return removeDeadScreenSession(currentSession);
+  }
+
+  if (currentSession) {
+    const output = `${result.stdout}\n${result.stderr}`.trim();
+    const error = new Error(output || 'The screen session is still running and could not be closed.');
+    error.stderr = result.stderr;
+    error.status = 409;
+    throw error;
+  }
+
+  rememberRemovedSession(session);
   forgetSession(session.id);
   return session;
 }
@@ -617,17 +759,33 @@ async function renameSession(value, nextName) {
     throw error;
   }
 
+  if (!isKnownLiveSession(session)) {
+    const message = session.status === 'dead'
+      ? 'Dead screen sessions cannot be renamed. Close the session to remove its stale socket.'
+      : `Screen session has an unsupported status and cannot be renamed safely: ${session.id}`;
+    const error = new Error(message);
+    error.status = 409;
+    throw error;
+  }
+
   if (sessions.some((item) => item.id !== session.id && item.name === nextName)) {
     const error = new Error('Session name already exists.');
     error.status = 409;
     throw error;
   }
 
-  await execScreen(['-S', session.id, '-X', 'sessionname', nextName]);
+  const result = await execScreen(['-S', session.id, '-X', 'sessionname', nextName], { allowedExitCodes: [1] });
+  if (result.code !== 0) {
+    const output = `${result.stdout}\n${result.stderr}`.trim();
+    const error = new Error(output || `screen exited with code ${result.code}.`);
+    error.stderr = result.stderr;
+    error.status = 409;
+    throw error;
+  }
 
   const pid = session.id.split('.')[0];
   const nextSessions = await listSessions();
-  const renamed = nextSessions.find((item) => item.id.startsWith(`${pid}.`));
+  const renamed = nextSessions.find((item) => item.id === `${pid}.${nextName}` && isKnownLiveSession(item));
 
   if (!renamed) {
     throw new Error('screen renamed the session, but the updated session was not found.');
@@ -638,20 +796,20 @@ async function renameSession(value, nextName) {
 }
 
 async function selectDefaultSession(sizeInput = null) {
-  let sessions = await listSessions();
-
+  const sessions = await listSessions();
   const { lastSessionId } = readState();
+
   if (!lastSessionId) return createSession(null, sizeInput);
 
   if (!sessions.length) return createSession(null, sizeInput);
 
   const last = lastSessionId ? resolveSession(sessions, lastSessionId) : null;
-  if (last && !last.attached) {
+  if (last && isExplicitlyDetachedSession(last)) {
     rememberSession(last.id);
     return last;
   }
 
-  const detached = sessions.find((session) => session.id !== lastSessionId && !session.attached && session.status !== 'dead');
+  const detached = sessions.find((session) => session.id !== lastSessionId && isExplicitlyDetachedSession(session));
   if (detached) {
     rememberSession(detached.id);
     return detached;
@@ -737,8 +895,8 @@ app.use('/api/sessions', requireAuth);
 
 app.get('/api/sessions', async (_req, res, next) => {
   try {
-    const state = readState();
     const sessions = await listSessions();
+    const state = readState();
     res.json({ sessions, lastSessionId: state.lastSessionId || null });
   } catch (error) {
     next(error);
@@ -841,6 +999,84 @@ wss.on('connection', async (ws, _request, url) => {
   }
 
   let term;
+  const pendingMessages = [];
+  const queueMessage = (data) => {
+    if (pendingMessages.length < 256) pendingMessages.push(data);
+  };
+  const closeOnTerminalError = () => {
+    try {
+      if (ws.readyState === ws.OPEN) ws.close(1011, 'Terminal operation failed');
+    } catch {
+      // The socket may have closed between the readyState check and close().
+    }
+  };
+  const writeTerminalData = (data) => {
+    if (!term) {
+      queueMessage(data);
+      return;
+    }
+    try {
+      term.write(data);
+    } catch {
+      closeOnTerminalError();
+    }
+  };
+  const handleMessage = (message) => {
+    const data = message.toString();
+    let payload;
+
+    try {
+      payload = JSON.parse(data);
+    } catch {
+      writeTerminalData(data);
+      return;
+    }
+
+    if (payload === null) {
+      writeTerminalData(data);
+      return;
+    }
+
+    if (payload.type === 'ping') {
+      try {
+        if (typeof payload.id === 'string' && ws.readyState === ws.OPEN) {
+          ws.send(JSON.stringify({ type: 'pong', id: payload.id }));
+        }
+      } catch {
+        closeOnTerminalError();
+      }
+      return;
+    }
+
+    if (!term) {
+      queueMessage(data);
+      return;
+    }
+
+    if (payload.type === 'input' && typeof payload.data === 'string') {
+      writeTerminalData(payload.data);
+    }
+    if (payload.type === 'resize') {
+      const { cols: nextCols, rows: nextRows } = normalizeTerminalSize(payload.cols, payload.rows);
+      try {
+        term.resize(nextCols, nextRows);
+      } catch {
+        closeOnTerminalError();
+        return;
+      }
+      resizeSessionWindow(requestedSession, nextCols, nextRows).catch(() => {});
+    }
+  };
+
+  ws.on('message', handleMessage);
+  ws.on('close', () => {
+    try {
+      if (term) term.kill();
+    } catch {
+      // The PTY may have already exited.
+    }
+  });
+
   try {
     const sessions = await listSessions();
     const session = resolveSession(sessions, requestedSession);
@@ -851,7 +1087,18 @@ wss.on('connection', async (ws, _request, url) => {
       return;
     }
 
+    if (!isKnownLiveSession(session)) {
+      const message = session.status === 'dead'
+        ? `session is dead: ${session.id}; close it to remove the stale socket`
+        : `session has an unsupported status: ${session.id}`;
+      ws.send(`\r\nscreen-plus: ${message}\r\n`);
+      ws.close(1008);
+      return;
+    }
+
+    if (ws.readyState !== ws.OPEN) return;
     await resizeSessionWindow(session.id, cols, rows);
+    if (ws.readyState !== ws.OPEN) return;
     const args = screenArgs(force ? ['-A', '-D', '-r', session.id] : ['-A', '-r', session.id]);
     rememberSession(session.id);
 
@@ -873,31 +1120,15 @@ wss.on('connection', async (ws, _request, url) => {
         ws.close();
       }
     });
+
+    for (const message of pendingMessages.splice(0)) handleMessage(message);
   } catch (error) {
-    ws.send(`\r\nscreen-plus: ${error.message}\r\n`);
-    ws.close(1011);
+    if (ws.readyState === ws.OPEN) {
+      ws.send(`\r\nscreen-plus: ${error.message}\r\n`);
+      ws.close(1011);
+    }
     return;
   }
-
-  ws.on('message', (message) => {
-    try {
-      const payload = JSON.parse(message.toString());
-      if (payload.type === 'input' && typeof payload.data === 'string') {
-        term.write(payload.data);
-      }
-      if (payload.type === 'resize') {
-        const { cols: nextCols, rows: nextRows } = normalizeTerminalSize(payload.cols, payload.rows);
-        term.resize(nextCols, nextRows);
-        resizeSessionWindow(requestedSession, nextCols, nextRows).catch(() => {});
-      }
-    } catch {
-      term.write(message.toString());
-    }
-  });
-
-  ws.on('close', () => {
-    if (term) term.kill();
-  });
 });
 
 server.listen(PORT, HOST, () => {
