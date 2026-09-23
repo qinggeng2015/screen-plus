@@ -33,7 +33,6 @@ ENV NODE_ENV=production \
   HOME=/data/home \
   SCREEN_PLUS_STATE_DIR=/data \
   SCREEN_PLUS_CONFIG=/data/config.json \
-  SCREEN_PLUS_SCREENRC=/app/screen-plus.screenrc \
   SCREEN_PLUS_SHELL=/usr/bin/zsh \
   SCREEN_PLUS_HOME=/data/home \
   SHELL=/usr/bin/zsh \
@@ -43,7 +42,7 @@ ENV NODE_ENV=production \
   SCREEN_PLUS_LOCALE=en_US.UTF-8
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends screen tini ca-certificates locales openssh-client zsh zsh-autosuggestions zsh-syntax-highlighting \
+  && apt-get install -y --no-install-recommends tini ca-certificates locales openssh-client zsh zsh-autosuggestions zsh-syntax-highlighting \
   && sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen \
   && locale-gen en_US.UTF-8 \
   && rm -rf /var/lib/apt/lists/* \
@@ -52,7 +51,7 @@ RUN apt-get update \
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY server ./server
-COPY LICENSE THIRD-PARTY-NOTICES.md screen-plus.screenrc package*.json ./
+COPY LICENSE THIRD-PARTY-NOTICES.md package*.json ./
 COPY docker/zshrc /opt/screen-plus/zshrc
 COPY docker-entrypoint.sh /usr/local/bin/screen-plus-entrypoint
 

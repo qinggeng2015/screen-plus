@@ -1,7 +1,7 @@
 {
   "name": "Screen Plus",
   "short_name": "Screen Plus",
-  "description": "A web terminal for GNU Screen sessions.",
+  "description": "A web terminal with persistent sessions and reconnect support.",
   "id": ".",
   "start_url": ".",
   "scope": ".",

@@ -12,22 +12,20 @@ declare global {
 
 declare const __SCREEN_PLUS_DEV_BASE_PATH__: string;
 
-type ScreenSession = {
+type TerminalSession = {
   id: string;
   name: string;
-  backend?: 'screen' | 'direct';
-  status: 'attached' | 'detached' | 'multi' | 'dead' | 'unknown';
+  status: 'attached' | 'detached';
   attached: boolean;
   lastSeen: string | null;
-  managed: boolean;
 };
 
 type SessionResponse = {
-  session: ScreenSession;
+  session: TerminalSession;
 };
 
 type SessionsResponse = {
-  sessions: ScreenSession[];
+  sessions: TerminalSession[];
   lastSessionId: string | null;
 };
 
@@ -133,13 +131,10 @@ app.innerHTML = `
         <button class="icon-button" id="closeDrawer" type="button" aria-label="关闭会话列表">×</button>
       </header>
       <div class="drawer-actions">
-        <button class="primary-action" id="newSession" type="button">新建会话</button>
+        <button class="primary-action" id="newSession" type="button" aria-describedby="sessionLifetimeHint">新建会话</button>
         <button class="ghost-action" id="refreshSessions" type="button">刷新</button>
       </div>
-      <div class="direct-session-action">
-        <button class="ghost-action" id="newDirectSession" type="button" aria-describedby="directSessionHint">新建直连终端</button>
-        <p id="directSessionHint">适合 Codex 等交互工具；刷新可重连，服务重启后结束</p>
-      </div>
+      <p class="session-lifetime-hint" id="sessionLifetimeHint">刷新或断网后可重连，服务重启后会话结束</p>
       <div class="session-list" id="sessionList"></div>
     </aside>
 
@@ -287,8 +282,8 @@ const terminalTapMoveTolerance = 8;
 const terminalTouchScrollSuppressMouseMs = 700;
 const terminalKeyboardTransitionMs = 180;
 let socket: WebSocket | null = null;
-let activeSession: ScreenSession | null = null;
-let sessions: ScreenSession[] = [];
+let activeSession: TerminalSession | null = null;
+let sessions: TerminalSession[] = [];
 let ctrlActive = false;
 let altActive = false;
 let shiftActive = false;
@@ -872,9 +867,7 @@ function updateSessionChip(message?: string) {
     return;
   }
 
-  sessionChip.textContent = activeSession.backend === 'direct'
-    ? `${activeSession.name} · 直连`
-    : activeSession.name;
+  sessionChip.textContent = activeSession.name;
 }
 
 function renderSessions() {
@@ -889,7 +882,6 @@ function renderSessions() {
     const item = document.createElement('article');
     item.className = 'session-item';
     item.dataset.active = String(activeSession?.id === session.id);
-    const unavailable = session.status === 'dead' || session.status === 'unknown';
 
     const title = document.createElement('button');
     title.type = 'button';
@@ -899,57 +891,36 @@ function renderSessions() {
     name.textContent = session.name;
     const identifier = document.createElement('span');
     identifier.className = 'session-id';
-    identifier.textContent = session.backend === 'direct' ? `直连 · ${session.id}` : session.id;
+    identifier.textContent = session.id;
     title.append(name, identifier);
-    title.disabled = unavailable;
-    if (unavailable) {
-      title.title = session.status === 'dead'
-        ? '会话已失效，请使用关闭按钮清理'
-        : '无法识别会话状态，为避免误操作已禁止打开';
-    } else {
-      title.addEventListener('click', () => {
-        connectSession(session, session.attached);
-        setDrawerOpen(false);
-      });
-    }
+    title.addEventListener('click', () => {
+      connectSession(session, session.attached);
+      setDrawerOpen(false);
+    });
 
     const badge = document.createElement('span');
     badge.className = `session-badge session-badge-${session.status}`;
-    badge.textContent = session.attached
-      ? '占用'
-      : session.status === 'dead'
-        ? '失效'
-        : session.status === 'unknown'
-          ? '异常'
-          : '空闲';
+    badge.textContent = session.attached ? '占用' : '空闲';
 
     const renameButton = document.createElement('button');
     renameButton.type = 'button';
     renameButton.className = 'session-tool session-rename';
     renameButton.setAttribute('aria-label', `重命名会话 ${session.name}`);
     renameButton.textContent = '✎';
-    renameButton.disabled = unavailable;
-    if (!unavailable) {
-      renameButton.addEventListener('click', (event) => {
-        event.stopPropagation();
-        renameSession(session);
-      });
-    }
+    renameButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      renameSession(session);
+    });
 
     const closeButton = document.createElement('button');
     closeButton.type = 'button';
     closeButton.className = 'session-tool session-close';
     closeButton.setAttribute('aria-label', `关闭会话 ${session.name}`);
     closeButton.textContent = '×';
-    closeButton.disabled = session.status === 'unknown';
-    if (session.status === 'unknown') {
-      closeButton.title = '无法识别会话状态，为避免误操作已禁止关闭';
-    } else {
-      closeButton.addEventListener('click', (event) => {
-        event.stopPropagation();
-        closeSession(session);
-      });
-    }
+    closeButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      closeSession(session);
+    });
 
     item.append(title, badge, renameButton, closeButton);
     return item;
@@ -987,19 +958,14 @@ function selectFallbackSession(closedSessionId: string, previousSessions = sessi
   const freshById = new Map(sessions.map((session) => [session.id, session]));
   const candidates = orderedCandidates
     .map((session) => freshById.get(session.id))
-    .filter((session): session is ScreenSession => {
-      if (!session) return false;
-      return session.id !== closedSessionId
-        && session.status !== 'dead'
-        && session.status !== 'unknown';
-    });
+    .filter((session): session is TerminalSession => Boolean(session && session.id !== closedSessionId));
 
   return candidates.find((session) => !session.attached)
     || candidates[0]
     || null;
 }
 
-function websocketUrl(session: ScreenSession, force: boolean) {
+function websocketUrl(session: TerminalSession, force: boolean) {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const params = new URLSearchParams({
     session: session.id,
@@ -1033,11 +999,11 @@ function ensureActiveConnection(reason = 'resume') {
   window.setTimeout(() => {
     reconnectAfterResume = false;
     if (!terminalStarted || connectionTakenOver || activeSession?.id !== session.id) return;
-    connectSession(session, session.backend === 'direct' || session.attached, { clear: false });
+    connectSession(session, true, { clear: false });
   }, 120);
 }
 
-function connectSession(session: ScreenSession, force = false, options: { clear?: boolean } = {}) {
+function connectSession(session: TerminalSession, force = false, options: { clear?: boolean } = {}) {
   const preserveTerminalOutput = options.clear === false && activeSession?.id === session.id;
   if (preserveTerminalOutput) {
     flushTerminalOutput();
@@ -1064,12 +1030,12 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
   const connection = new WebSocket(websocketUrl(session, force));
   connection.binaryType = 'arraybuffer';
   socket = connection;
-  let awaitingSnapshot = session.backend === 'direct';
+  let awaitingSnapshot = true;
   const restoringOutput: Array<string | Uint8Array> = [];
   const maxRestoringOutputBytes = 4 * 1024 * 1024;
   let restoringOutputBytes = 0;
   let restoreOverflowed = false;
-  const restore = awaitingSnapshot ? { connection, replayingSnapshot: true } : null;
+  const restore = { connection, replayingSnapshot: true };
   terminalRestore = restore;
 
   function discardRestoreOutput() {
@@ -1107,7 +1073,7 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
   }
 
   function consumeSnapshot(data: string) {
-    if (!awaitingSnapshot || activeSession?.backend !== 'direct') return false;
+    if (!awaitingSnapshot) return false;
     let payload: { type?: unknown; data?: unknown; cols?: unknown; rows?: unknown };
     try {
       payload = JSON.parse(data);
@@ -1132,7 +1098,7 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
       terminal.resize(size.cols, size.rows);
       terminal.write(snapshot, () => {
         if (socket !== connection || terminalRestore !== restore) return;
-        if (restore) restore.replayingSnapshot = false;
+        restore.replayingSnapshot = false;
         finishSnapshotRestore();
       });
     });
@@ -1197,7 +1163,7 @@ function connectSession(session: ScreenSession, force = false, options: { clear?
     lastSentTerminalSize = null;
     clearSocketHeartbeat(connection);
     reconnecting = false;
-    connectionTakenOver = session.backend === 'direct' && event.code === 4001;
+    connectionTakenOver = event.code === 4001;
     updateSessionChip(connectionTakenOver ? '已在其他页面打开' : '连接已断开');
     refreshSessions();
   });
@@ -1220,7 +1186,7 @@ async function openDefaultSession() {
       body: JSON.stringify({ cols: terminal.cols || 120, rows: terminal.rows || 32 })
     });
     activeSession = session;
-    connectSession(session, session.backend === 'direct');
+    connectSession(session, true);
     await refreshSessions();
   } catch (error) {
     const message = error instanceof Error ? error.message : '默认会话创建失败';
@@ -1229,12 +1195,12 @@ async function openDefaultSession() {
   }
 }
 
-async function createNewSession(backend: 'screen' | 'direct' = 'screen') {
+async function createNewSession() {
   try {
     fitTerminalNow();
     const { session } = await api<SessionResponse>('/api/sessions', {
       method: 'POST',
-      body: JSON.stringify({ backend, cols: terminal.cols || 120, rows: terminal.rows || 32 })
+      body: JSON.stringify({ cols: terminal.cols || 120, rows: terminal.rows || 32 })
     });
     await refreshSessions();
     connectSession(session, false);
@@ -1244,12 +1210,8 @@ async function createNewSession(backend: 'screen' | 'direct' = 'screen') {
   }
 }
 
-async function closeSession(session: ScreenSession) {
-  const confirmation = session.backend === 'direct'
-    ? `关闭直连终端「${session.name}」？\n会话中的进程会被终止。`
-    : session.status === 'dead'
-      ? `清理失效的 screen 会话「${session.name}」？\\n该会话进程已经不存在，只会移除残留 socket。`
-      : `关闭 screen 会话「${session.name}」？\\n会话中的进程会被终止。`;
+async function closeSession(session: TerminalSession) {
+  const confirmation = `关闭终端会话「${session.name}」？\n会话中的进程会被终止。`;
   const confirmed = window.confirm(confirmation);
   if (!confirmed) return;
 
@@ -1286,7 +1248,7 @@ async function closeSession(session: ScreenSession) {
   }
 }
 
-async function renameSession(session: ScreenSession) {
+async function renameSession(session: TerminalSession) {
   const nextName = window.prompt('新的会话名称', session.name)?.trim();
   if (!nextName || nextName === session.name) return;
 
@@ -1468,7 +1430,6 @@ themeToggle.addEventListener('click', () => {
 document.querySelector('#closeDrawer')?.addEventListener('click', () => setDrawerOpen(false));
 document.querySelector('#refreshSessions')?.addEventListener('click', refreshSessions);
 document.querySelector('#newSession')?.addEventListener('click', () => createNewSession());
-document.querySelector('#newDirectSession')?.addEventListener('click', () => createNewSession('direct'));
 
 authForm.addEventListener('submit', (event) => {
   event.preventDefault();

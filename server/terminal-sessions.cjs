@@ -89,17 +89,15 @@ function serializeTerminal(terminal, serializer) {
   return result;
 }
 
-function createDirectSessions({ spawn, shell, cwd, env, onExit = () => {} }) {
+function createTerminalSessions({ spawn, shell, cwd, env, onExit = () => {} }) {
   const sessions = new Map();
 
   function metadata(session) {
     return {
       id: session.id,
       name: session.name,
-      backend: 'direct',
       status: session.observer ? 'attached' : 'detached',
       attached: Boolean(session.observer),
-      managed: true,
       lastSeen: session.lastSeen,
       cols: session.terminal.cols,
       rows: session.terminal.rows
@@ -108,7 +106,7 @@ function createDirectSessions({ spawn, shell, cwd, env, onExit = () => {} }) {
 
   function requireSession(id) {
     const session = sessions.get(id);
-    if (!session || session.closed) throw sessionError('NOT_FOUND', 'Direct terminal session not found.');
+    if (!session || session.closed) throw sessionError('NOT_FOUND', 'Terminal session not found.');
     return session;
   }
 
@@ -151,7 +149,7 @@ function createDirectSessions({ spawn, shell, cwd, env, onExit = () => {} }) {
       throw error;
     }
     const session = {
-      id: `direct-${randomUUID()}`, name, process, terminal, serializer,
+      id: `term-${randomUUID()}`, name, process, terminal, serializer,
       observer: null, lastSeen: new Date().toISOString(), closed: false,
       queue: Promise.resolve(), queuedBytes: 0, paused: false,
       baseline: '\x1bc', replay: [], replayBytes: 0, recoverable: true,
@@ -231,7 +229,7 @@ function createDirectSessions({ spawn, shell, cwd, env, onExit = () => {} }) {
     const session = requireSession(id);
     return enqueue(session, () => {
       requireSession(id);
-      if (session.observer && !options.force) throw sessionError('ATTACHED', 'Direct terminal session is already attached.');
+      if (session.observer && !options.force) throw sessionError('ATTACHED', 'Terminal session is already attached.');
       // Prefer a fresh compact snapshot; when inside a CSI/OSC, the preceding
       // checkpoint plus its exact raw tail also preserves the parser prefix.
       checkpoint(session);
@@ -295,4 +293,4 @@ function createDirectSessions({ spawn, shell, cwd, env, onExit = () => {} }) {
   };
 }
 
-module.exports = { createDirectSessions };
+module.exports = { createTerminalSessions };

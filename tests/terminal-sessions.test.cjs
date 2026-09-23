@@ -1,12 +1,12 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { Terminal } = require('@xterm/headless');
-const { createDirectSessions } = require('../server/direct-sessions.cjs');
+const { createTerminalSessions } = require('../server/terminal-sessions.cjs');
 
 function fixture(t, options = {}) {
   const processes = [];
   const exited = [];
-  const manager = createDirectSessions({
+  const manager = createTerminalSessions({
     shell: '/bin/sh', cwd: '/tmp', env: { TERM: 'screen', STY: 'old', TMUX: 'old', TMUX_PANE: '%1' },
     onExit: session => exited.push(session),
     spawn(shell, args, opts) {
@@ -45,7 +45,7 @@ function state(term) {
   };
 }
 
-test('direct stream preserves native synchronized frames across chunks and disconnection', async t => {
+test('terminal stream preserves native synchronized frames across chunks and disconnection', async t => {
   const { manager, session, child } = fixture(t);
   const chunks = [];
   const handle = await manager.attach(session.id, { onSnapshot() {}, onData: data => chunks.push(data) });

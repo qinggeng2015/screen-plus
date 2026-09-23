@@ -1,4 +1,4 @@
-// Keep these bounds aligned with server/terminal-size.cjs: screen and xterm must
+// Keep these bounds aligned with server/terminal-size.cjs: the PTY and xterm must
 // use the same geometry, including when the fitted viewport exceeds the limits.
 function normalizeDimension(value: unknown, fallback: number, min: number, max: number) {
   const number = typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN;

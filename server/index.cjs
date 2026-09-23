@@ -3,13 +3,11 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { execFile } = require('node:child_process');
 const express = require('express');
 const pty = require('node-pty');
 const { WebSocketServer } = require('ws');
-const { createTerminalOutput } = require('./terminal-output.cjs');
 const { normalizeTerminalSize } = require('./terminal-size.cjs');
-const { createDirectSessions } = require('./direct-sessions.cjs');
+const { createTerminalSessions } = require('./terminal-sessions.cjs');
 
 function isUtf8Locale(value) {
   return /utf-?8/i.test(String(value || ''));
@@ -31,9 +29,7 @@ function normalizeBasePath(value) {
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
-const SCREEN_BIN = process.env.SCREEN_BIN || 'screen';
-const SCREEN_RC = process.env.SCREEN_PLUS_SCREENRC || path.join(process.cwd(), 'screen-plus.screenrc');
-const SCREEN_SHELL = process.env.SCREEN_PLUS_SHELL || '';
+const TERMINAL_SHELL = process.env.SCREEN_PLUS_SHELL || process.env.SHELL || '/bin/sh';
 const STATE_DIR = process.env.SCREEN_PLUS_STATE_DIR || path.join(process.cwd(), '.screen-plus');
 const STATE_FILE = path.join(STATE_DIR, 'state.json');
 const CONFIG_FILE = process.env.SCREEN_PLUS_CONFIG
@@ -46,16 +42,15 @@ const BASE_PATH = normalizeBasePath(process.env.SCREEN_PLUS_BASE_PATH);
 const AUTH_COOKIE = 'screen_plus_session';
 const AUTH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PASSWORD_KEY_LENGTH = 64;
-const REMOVED_SESSION_TTL_MS = 60 * 1000;
 const UTF8_LOCALE = process.env.SCREEN_PLUS_LOCALE
   || usableUtf8Locale(process.env.LANG)
   || usableUtf8Locale(process.env.LC_CTYPE)
   || usableUtf8Locale(process.env.LC_ALL)
   || 'C.UTF-8';
 const SHELL_HOME = process.env.SCREEN_PLUS_HOME || process.env.HOME || os.homedir() || process.cwd();
-const directSessions = createDirectSessions({
+const terminalSessions = createTerminalSessions({
   spawn: pty.spawn,
-  shell: SCREEN_SHELL || process.env.SHELL || '/bin/sh',
+  shell: TERMINAL_SHELL,
   cwd: SHELL_HOME,
   env: terminalEnv(),
   onExit(session) { forgetSession(session.id); }
@@ -145,7 +140,7 @@ function webManifest(req) {
   return {
     name: 'Screen Plus',
     short_name: 'Screen Plus',
-    description: 'A web terminal for GNU Screen sessions.',
+    description: 'A web shell with persistent sessions and reconnectable terminal views.',
     id: scope,
     start_url: scope,
     scope,
@@ -230,12 +225,6 @@ function renderIndexHtml(req) {
   return `${runtimeConfig}\n${html}`;
 }
 
-function screenArgs(args) {
-  const baseArgs = ['-U', '-c', SCREEN_RC];
-  if (SCREEN_SHELL) baseArgs.push('-s', SCREEN_SHELL);
-  return [...baseArgs, ...args];
-}
-
 function terminalEnv() {
   const env = { ...process.env };
 
@@ -251,74 +240,6 @@ function terminalEnv() {
     LC_CTYPE: UTF8_LOCALE,
     TERM: 'xterm-256color'
   };
-}
-
-function execScreen(args, options = {}) {
-  return new Promise((resolve, reject) => {
-    execFile(SCREEN_BIN, screenArgs(args), {
-      timeout: 10000,
-      cwd: options.cwd || process.cwd(),
-      env: terminalEnv()
-    }, (error, stdout, stderr) => {
-      const allowedExitCodes = options.allowedExitCodes || [];
-      if (error && !allowedExitCodes.includes(error.code)) {
-        error.stdout = stdout;
-        error.stderr = stderr;
-        reject(error);
-        return;
-      }
-      resolve({ stdout, stderr, code: error ? error.code : 0 });
-    });
-  });
-}
-
-function createAttachedThenDetachSession(sessionName, size) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let detachTimer;
-    let timeoutTimer;
-
-    const term = pty.spawn(SCREEN_BIN, screenArgs(['-S', sessionName]), {
-      name: 'xterm-256color',
-      cols: size.cols,
-      rows: size.rows,
-      cwd: SHELL_HOME,
-      env: terminalEnv()
-    });
-
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(detachTimer);
-      clearTimeout(timeoutTimer);
-      if (error) {
-        try {
-          term.kill();
-        } catch {
-          // The process may already have exited.
-        }
-        reject(error);
-        return;
-      }
-      resolve();
-    };
-
-    detachTimer = setTimeout(() => {
-      term.write('\x01d');
-    }, 350);
-
-    timeoutTimer = setTimeout(() => {
-      finish(new Error('Timed out while creating screen session.'));
-    }, 5000);
-
-    term.onExit(({ exitCode, signal }) => {
-      if (exitCode === 0) {
-        finish();
-        return;
-      }
-      finish(new Error(`screen exited while creating session (${signal || exitCode}).`));
-    });
-  });
 }
 
 function readState() {
@@ -520,324 +441,64 @@ function forgetSession(sessionId) {
   });
 }
 
-const recentlyRemovedSessions = new Map();
-const deadSessionCleanupPromises = new Map();
-
-function pruneRecentlyRemovedSessions() {
-  const cutoff = Date.now() - REMOVED_SESSION_TTL_MS;
-  for (const [id, entry] of recentlyRemovedSessions) {
-    if (entry.removedAt < cutoff) recentlyRemovedSessions.delete(id);
-  }
+function listSessions() {
+  return terminalSessions.list();
 }
 
-function rememberRemovedSession(session) {
-  pruneRecentlyRemovedSessions();
-  recentlyRemovedSessions.set(session.id, {
-    session,
-    removedAt: Date.now()
-  });
+function resolveSession(value) {
+  return terminalSessions.get(value) || listSessions().find((session) => session.name === value);
 }
 
-function resolveRecentlyRemovedSession(value) {
-  pruneRecentlyRemovedSessions();
-  for (const { session } of recentlyRemovedSessions.values()) {
-    if (session.id === value || session.name === value) return session;
-  }
-  return null;
-}
-
-function parseScreenList(output) {
-  return output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .map((line) => {
-      const match = line.match(/^(\d+\.[^\s]+)\s+(.*)$/);
-      if (!match) return null;
-
-      const [, id, detail] = match;
-      const statusDetail = detail.match(/\(([^()]*)\)\s*$/)?.[1].trim().toLowerCase() || '';
-      let status = 'unknown';
-      let attached = false;
-
-      if (statusDetail === 'attached') {
-        status = 'attached';
-        attached = true;
-      } else if (statusDetail === 'detached') {
-        status = 'detached';
-      } else if (/^multi(?:,\s*(?:attached|detached))?$/.test(statusDetail)) {
-        status = 'multi';
-        attached = !/,\s*detached$/.test(statusDetail);
-      } else if (/^dead(?:\s+\?+)?$/.test(statusDetail)) {
-        status = 'dead';
-      } else if (statusDetail === 'remote or dead') {
-        // It may be a live session on another host sharing the socket directory.
-        status = 'unknown';
-      }
-
-      const dateMatch = detail.match(/\((\d{1,4}[/-]\d{1,2}[/-]\d{1,4}[^)]*)\)/);
-      const name = id.includes('.') ? id.slice(id.indexOf('.') + 1) : id;
-
-      return {
-        id,
-        name,
-        status,
-        attached,
-        lastSeen: dateMatch ? dateMatch[1] : null,
-        managed: name === SESSION_PREFIX || name.startsWith(`${SESSION_PREFIX}-`)
-      };
-    })
-    .filter(Boolean);
-}
-
-async function readScreenSessions() {
-  const result = await execScreen(['-ls'], { allowedExitCodes: [1] });
-  const output = `${result.stdout}\n${result.stderr}`;
-  const sessions = parseScreenList(output);
-
-  if (result.code !== 0 && !sessions.length && !/no sockets found/i.test(output)) {
-    const error = new Error(output.trim() || `screen exited with code ${result.code}.`);
-    error.stdout = result.stdout;
-    error.stderr = result.stderr;
-    throw error;
-  }
-
-  return sessions;
-}
-
-function wait(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-async function findSessionAfterCommand(sessionId) {
-  const maxAttempts = 5;
-  let session = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const sessions = await readScreenSessions();
-    session = sessions.find((item) => item.id === sessionId) || null;
-    if (!session) return null;
-    if (attempt < maxAttempts - 1) await wait(50);
-  }
-
+function requireSession(value) {
+  const session = resolveSession(value);
+  if (!session) throw Object.assign(new Error('Session not found.'), { status: 404 });
   return session;
 }
 
-function removeDeadScreenSession(session) {
-  let cleanup = deadSessionCleanupPromises.get(session.id);
-  if (!cleanup) {
-    cleanup = (async () => {
-      await execScreen(['-wipe', session.id], { allowedExitCodes: [1] });
-
-      const remaining = await findSessionAfterCommand(session.id);
-      if (remaining) {
-        const error = new Error(`Dead screen session could not be removed: ${session.id}`);
-        error.status = 409;
-        throw error;
-      }
-
-      rememberRemovedSession(session);
-      forgetSession(session.id);
-      return session;
-    })()
-      .finally(() => {
-        deadSessionCleanupPromises.delete(session.id);
-      });
-    deadSessionCleanupPromises.set(session.id, cleanup);
-  }
-  return cleanup;
-}
-
-async function listSessions() {
-  return [...await readScreenSessions(), ...directSessions.list()];
-}
-
-function resolveDirectSession(value) {
-  return directSessions.get(value) || directSessions.list().find((session) => session.name === value);
-}
-
-function validateSessionName(sessionName) {
-  if (!/^[A-Za-z0-9_.:@-]{1,64}$/.test(sessionName)) {
-    const error = new Error('Session name can only contain letters, numbers, dot, underscore, colon, at sign, and dash.');
-    error.status = 400;
-    throw error;
+function validateSessionName(name) {
+  if (typeof name !== 'string' || !/^[A-Za-z0-9_.:@-]{1,64}$/.test(name)) {
+    throw Object.assign(new Error('Session name can only contain letters, numbers, dot, underscore, colon, at sign, and dash.'), { status: 400 });
   }
 }
 
-async function createSession(name, sizeInput = null) {
-  const sessionName = name || `${SESSION_PREFIX}-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;
+function createSession(name, sizeInput = {}) {
+  const sessionName = name === undefined || name === null || name === ''
+    ? `${SESSION_PREFIX}-${crypto.randomBytes(4).toString('hex')}`
+    : name;
   validateSessionName(sessionName);
-
-  const size = sizeInput ? normalizeTerminalSize(sizeInput.cols, sizeInput.rows) : null;
-  if (size) {
-    await createAttachedThenDetachSession(sessionName, size);
-  } else {
-    await execScreen(['-dmS', sessionName], { cwd: SHELL_HOME });
+  if (listSessions().some((session) => session.name === sessionName)) {
+    throw Object.assign(new Error('Session name already exists.'), { status: 409 });
   }
-  const sessions = await listSessions();
-  const created = sessions.find((session) => (
-    session.name === sessionName || session.id.endsWith(`.${sessionName}`)
-  ) && isKnownLiveSession(session));
-
-  if (!created) {
-    throw new Error('screen reported success, but the created session was not found.');
-  }
-
-  rememberSession(created.id);
-  return created;
-}
-
-async function resizeSessionWindow(value, cols, rows) {
-  // Direct sessions resize through their one attached PTY only.
-  if (directSessions.get(value)) return;
-  const { cols: nextCols, rows: nextRows } = normalizeTerminalSize(cols, rows);
-
-  try {
-    await execScreen(['-S', value, '-X', 'height', '-w', String(nextRows), String(nextCols)]);
-  } catch {
-    // The attach path also uses screen -A; sizing here is best-effort for first paint.
-  }
-}
-
-function resolveSession(sessions, value) {
-  return sessions.find((session) => session.id === value || session.name === value);
-}
-
-function isKnownLiveSession(session) {
-  return session.status === 'attached' || session.status === 'detached' || session.status === 'multi';
-}
-
-function isExplicitlyDetachedSession(session) {
-  return session.status === 'detached' || (session.status === 'multi' && !session.attached);
+  const size = normalizeTerminalSize(sizeInput?.cols, sizeInput?.rows);
+  const session = terminalSessions.create(sessionName, size);
+  rememberSession(session.id);
+  return session;
 }
 
 async function closeSession(value) {
-  const direct = resolveDirectSession(value);
-  if (direct) {
-    await directSessions.close(direct.id);
-    rememberRemovedSession(direct);
-    forgetSession(direct.id);
-    return direct;
-  }
-  const sessions = await readScreenSessions();
-  const session = resolveSession(sessions, value);
-
-  if (!session) {
-    const removedSession = resolveRecentlyRemovedSession(value);
-    if (removedSession) {
-      forgetSession(removedSession.id);
-      return removedSession;
-    }
-
-    const error = new Error('Session not found.');
-    error.status = 404;
-    throw error;
-  }
-
-  if (session.status === 'dead') {
-    return removeDeadScreenSession(session);
-  }
-
-  if (!isKnownLiveSession(session)) {
-    const error = new Error(`Screen session has an unsupported status and cannot be closed safely: ${session.id}`);
-    error.status = 409;
-    throw error;
-  }
-
-  const result = await execScreen(['-S', session.id, '-X', 'quit'], { allowedExitCodes: [1] });
-  const currentSession = await findSessionAfterCommand(session.id);
-
-  if (currentSession?.status === 'dead') {
-    return removeDeadScreenSession(currentSession);
-  }
-
-  if (currentSession) {
-    const output = `${result.stdout}\n${result.stderr}`.trim();
-    const error = new Error(output || 'The screen session is still running and could not be closed.');
-    error.stderr = result.stderr;
-    error.status = 409;
-    throw error;
-  }
-
-  rememberRemovedSession(session);
+  const session = requireSession(value);
+  await terminalSessions.close(session.id);
   forgetSession(session.id);
   return session;
 }
 
-async function renameSession(value, nextName) {
+function renameSession(value, nextName) {
   validateSessionName(nextName);
-
-  const sessions = await listSessions();
-  const session = resolveSession(sessions, value);
-
-  if (!session) {
-    const error = new Error('Session not found.');
-    error.status = 404;
-    throw error;
+  const session = requireSession(value);
+  if (listSessions().some((item) => item.id !== session.id && item.name === nextName)) {
+    throw Object.assign(new Error('Session name already exists.'), { status: 409 });
   }
-
-  if (!isKnownLiveSession(session)) {
-    const message = session.status === 'dead'
-      ? 'Dead screen sessions cannot be renamed. Close the session to remove its stale socket.'
-      : `Screen session has an unsupported status and cannot be renamed safely: ${session.id}`;
-    const error = new Error(message);
-    error.status = 409;
-    throw error;
-  }
-
-  if (sessions.some((item) => item.id !== session.id && item.name === nextName)) {
-    const error = new Error('Session name already exists.');
-    error.status = 409;
-    throw error;
-  }
-
-  if (session.backend === 'direct') {
-    return directSessions.rename(session.id, nextName);
-  }
-
-  const result = await execScreen(['-S', session.id, '-X', 'sessionname', nextName], { allowedExitCodes: [1] });
-  if (result.code !== 0) {
-    const output = `${result.stdout}\n${result.stderr}`.trim();
-    const error = new Error(output || `screen exited with code ${result.code}.`);
-    error.stderr = result.stderr;
-    error.status = 409;
-    throw error;
-  }
-
-  const pid = session.id.split('.')[0];
-  const nextSessions = await listSessions();
-  const renamed = nextSessions.find((item) => item.id === `${pid}.${nextName}` && isKnownLiveSession(item));
-
-  if (!renamed) {
-    throw new Error('screen renamed the session, but the updated session was not found.');
-  }
-
-  rememberSession(renamed.id);
-  return renamed;
+  return terminalSessions.rename(session.id, nextName);
 }
 
-async function selectDefaultSession(sizeInput = null) {
-  const sessions = await listSessions();
-  const { lastSessionId } = readState();
-
-  if (!lastSessionId) return createSession(null, sizeInput);
-
-  if (!sessions.length) return createSession(null, sizeInput);
-
-  const last = lastSessionId ? resolveSession(sessions, lastSessionId) : null;
-  // A refresh can arrive before the old WebSocket has closed. A direct session
-  // is explicitly reattached by the client, rather than starting a new shell.
-  if (last?.backend === 'direct') return last;
-  if (last && isExplicitlyDetachedSession(last)) {
-    rememberSession(last.id);
-    return last;
-  }
-
-  const detached = sessions.find((session) => session.id !== lastSessionId && isExplicitlyDetachedSession(session));
-  if (detached) {
-    rememberSession(detached.id);
-    return detached;
-  }
-
-  return createSession(null, sizeInput);
+function selectDefaultSession(sizeInput = {}) {
+  // The old WebSocket may still be attached when a refreshed page arrives.
+  // Returning the same process lets the client explicitly take over its view.
+  const session = terminalSessions.get(readState().lastSessionId)
+    || listSessions().find((item) => !item.attached);
+  if (!session) return createSession(undefined, sizeInput);
+  rememberSession(session.id);
+  return session;
 }
 
 app.get('/api/health', (_req, res) => {
@@ -925,38 +586,18 @@ app.get('/api/sessions', async (_req, res, next) => {
   }
 });
 
-app.post('/api/sessions/default', async (req, res, next) => {
+app.post('/api/sessions/default', (req, res, next) => {
   try {
-    const session = await selectDefaultSession({ cols: req.body?.cols, rows: req.body?.rows });
-    await resizeSessionWindow(session.id, req.body?.cols, req.body?.rows);
+    const session = selectDefaultSession({ cols: req.body?.cols, rows: req.body?.rows });
     res.json({ session });
   } catch (error) {
     next(error);
   }
 });
 
-app.post('/api/sessions', async (req, res, next) => {
+app.post('/api/sessions', (req, res, next) => {
   try {
-    const backend = req.body?.backend || 'screen';
-    if (backend !== 'screen' && backend !== 'direct') {
-      res.status(400).json({ error: 'Unknown terminal backend.' });
-      return;
-    }
-    const size = normalizeTerminalSize(req.body?.cols, req.body?.rows);
-    let session;
-    if (backend === 'direct') {
-      const name = req.body?.name || `${SESSION_PREFIX}-direct-${crypto.randomBytes(4).toString('hex')}`;
-      validateSessionName(name);
-      if ((await listSessions()).some((item) => item.name === name)) {
-        res.status(409).json({ error: 'Session name already exists.' });
-        return;
-      }
-      session = directSessions.create(name, size);
-      rememberSession(session.id);
-    } else {
-      session = await createSession(req.body?.name, size);
-    }
-    await resizeSessionWindow(session.id, req.body?.cols, req.body?.rows);
+    const session = createSession(req.body?.name, { cols: req.body?.cols, rows: req.body?.rows });
     res.status(201).json({ session });
   } catch (error) {
     next(error);
@@ -1009,7 +650,7 @@ app.use((error, _req, res, _next) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
-async function connectDirectTerminal(ws, sessionId, size, force) {
+async function connectTerminal(ws, sessionId, force) {
   let attachment = null;
   let closed = false;
   const pendingInput = [];
@@ -1069,8 +710,7 @@ async function connectDirectTerminal(ws, sessionId, size, force) {
   });
 
   try {
-    attachment = await directSessions.attach(sessionId, {
-      ...size,
+    attachment = await terminalSessions.attach(sessionId, {
       force,
       onSnapshot(snapshot) { send(JSON.stringify({ type: 'snapshot', ...snapshot })); },
       onData(data) { send(data, true); },
@@ -1123,159 +763,14 @@ server.on('upgrade', (request, socket, head) => {
 wss.on('connection', async (ws, _request, url) => {
   const requestedSession = url.searchParams.get('session');
   const force = url.searchParams.get('force') === '1';
-  const { cols, rows } = normalizeTerminalSize(url.searchParams.get('cols'), url.searchParams.get('rows'));
 
   if (!requestedSession) {
-    ws.send('\r\nscreen-plus: missing session id\r\n');
+    ws.send(Buffer.from('\r\nscreen-plus: missing session id\r\n'));
     ws.close(1008);
     return;
   }
 
-  if (requestedSession.startsWith('direct-')) {
-    await connectDirectTerminal(ws, requestedSession, { cols, rows }, force);
-    return;
-  }
-
-  let term;
-  const output = createTerminalOutput({
-    send(data) {
-      if (ws.readyState === ws.OPEN) ws.send(data);
-    }
-  });
-  const pendingMessages = [];
-  const queueMessage = (data) => {
-    if (pendingMessages.length < 256) pendingMessages.push(data);
-  };
-  const closeOnTerminalError = () => {
-    try {
-      if (ws.readyState === ws.OPEN) ws.close(1011, 'Terminal operation failed');
-    } catch {
-      // The socket may have closed between the readyState check and close().
-    }
-  };
-  const writeTerminalData = (data) => {
-    if (!term) {
-      queueMessage(data);
-      return;
-    }
-    try {
-      term.write(data);
-    } catch {
-      closeOnTerminalError();
-    }
-  };
-  const handleMessage = (message) => {
-    const data = message.toString();
-    let payload;
-
-    try {
-      payload = JSON.parse(data);
-    } catch {
-      writeTerminalData(data);
-      return;
-    }
-
-    if (payload === null) {
-      writeTerminalData(data);
-      return;
-    }
-
-    if (payload.type === 'ping') {
-      try {
-        if (typeof payload.id === 'string' && ws.readyState === ws.OPEN) {
-          ws.send(JSON.stringify({ type: 'pong', id: payload.id }));
-        }
-      } catch {
-        closeOnTerminalError();
-      }
-      return;
-    }
-
-    if (!term) {
-      queueMessage(data);
-      return;
-    }
-
-    if (payload.type === 'input' && typeof payload.data === 'string') {
-      writeTerminalData(payload.data);
-    }
-    if (payload.type === 'resize') {
-      const { cols: nextCols, rows: nextRows } = normalizeTerminalSize(payload.cols, payload.rows);
-      try {
-        term.resize(nextCols, nextRows);
-      } catch {
-        closeOnTerminalError();
-        return;
-      }
-      // Screen observes this PTY's SIGWINCH. A parallel `screen -X height`
-      // can finish later and overwrite a newer size, leaving the app and xterm
-      // on different grids. The attached PTY is the sole resize authority.
-    }
-  };
-
-  ws.on('message', handleMessage);
-  ws.on('close', () => {
-    output.dispose();
-    try {
-      if (term) term.kill();
-    } catch {
-      // The PTY may have already exited.
-    }
-  });
-
-  try {
-    const sessions = await listSessions();
-    const session = resolveSession(sessions, requestedSession);
-
-    if (!session) {
-      ws.send(`\r\nscreen-plus: session not found: ${requestedSession}\r\n`);
-      ws.close(1008);
-      return;
-    }
-
-    if (!isKnownLiveSession(session)) {
-      const message = session.status === 'dead'
-        ? `session is dead: ${session.id}; close it to remove the stale socket`
-        : `session has an unsupported status: ${session.id}`;
-      ws.send(`\r\nscreen-plus: ${message}\r\n`);
-      ws.close(1008);
-      return;
-    }
-
-    if (ws.readyState !== ws.OPEN) return;
-    await resizeSessionWindow(session.id, cols, rows);
-    if (ws.readyState !== ws.OPEN) return;
-    const args = screenArgs(force ? ['-A', '-D', '-r', session.id] : ['-A', '-r', session.id]);
-    rememberSession(session.id);
-
-    term = pty.spawn(SCREEN_BIN, args, {
-      name: 'xterm-256color',
-      cols,
-      rows,
-      cwd: SHELL_HOME,
-      env: terminalEnv()
-    });
-
-    term.onData((data) => {
-      output.push(data);
-    });
-
-    term.onExit(({ exitCode, signal }) => {
-      if (ws.readyState === ws.OPEN) {
-        output.flush();
-        ws.send(`\r\nscreen-plus: screen exited (${signal || exitCode})\r\n`);
-        ws.close();
-      }
-    });
-
-    for (const message of pendingMessages.splice(0)) handleMessage(message);
-  } catch (error) {
-    if (ws.readyState === ws.OPEN) {
-      ws.send(`\r\nscreen-plus: ${error.message}\r\n`);
-      ws.close(1011);
-    }
-    return;
-  }
+  await connectTerminal(ws, requestedSession, force);
 });
 
 server.listen(PORT, HOST, () => {

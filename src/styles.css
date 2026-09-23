@@ -398,16 +398,9 @@ button {
   padding: 14px 16px;
 }
 
-.direct-session-action {
+.session-lifetime-hint {
+  margin: 0;
   padding: 0 16px 14px;
-}
-
-.direct-session-action button {
-  width: 100%;
-}
-
-.direct-session-action p {
-  margin: 7px 0 0;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
@@ -468,11 +461,6 @@ button {
   cursor: pointer;
 }
 
-.session-main:disabled {
-  cursor: default;
-  opacity: 0.62;
-}
-
 .session-name,
 .session-id {
   overflow: hidden;
@@ -508,11 +496,6 @@ button {
   line-height: 1;
 }
 
-.session-tool:disabled {
-  cursor: default;
-  opacity: 0.38;
-}
-
 .session-rename {
   font-size: 17px;
 }
@@ -534,16 +517,9 @@ button {
   color: #96e7b5;
 }
 
-.session-badge-attached,
-.session-badge-multi {
+.session-badge-attached {
   background: rgba(244, 135, 113, 0.16);
   color: #ffac9c;
-}
-
-.session-badge-dead,
-.session-badge-unknown {
-  background: rgba(215, 186, 125, 0.16);
-  color: #ead39a;
 }
 
 .empty-state {
