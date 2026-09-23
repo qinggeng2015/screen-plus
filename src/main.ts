@@ -2,6 +2,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import { normalizeTerminalSize } from './terminal-size';
 import { writeTerminal } from './terminal-write';
+import { createTerminalFitScheduler } from './terminal-fit';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 
@@ -241,6 +242,7 @@ const viewportMetricTolerance = 1;
 const terminalTapMoveTolerance = 8;
 const terminalTouchScrollSuppressMouseMs = 700;
 const terminalKeyboardTransitionMs = 180;
+const terminalViewportSettleMs = 160;
 let socket: WebSocket | null = null;
 let activeSession: TerminalSession | null = null;
 let sessions: TerminalSession[] = [];
@@ -273,13 +275,25 @@ let terminalViewport: HTMLElement | null = null;
 let terminalTouchTap: TerminalTouchTap | null = null;
 let terminalSuppressMouseFocusUntil = 0;
 
-function fitTerminalNow() {
+const terminalFitScheduler = createTerminalFitScheduler(applyTerminalFit, {
+  requestFrame: callback => window.requestAnimationFrame(callback),
+  cancelFrame: id => window.cancelAnimationFrame(id),
+  setTimer: (callback, delay) => window.setTimeout(callback, delay),
+  clearTimer: id => window.clearTimeout(id)
+});
+
+function applyTerminalFit() {
   // Restore both the snapshot and already-received output at their original size.
   if (terminalRestore?.connection === socket) return;
   try {
     const dimensions = fitAddon.proposeDimensions();
-    if (dimensions) {
-      const { cols, rows } = normalizeTerminalSize(dimensions.cols, dimensions.rows);
+    // Ignore collapsed layout frames while the browser moves its keyboard or
+    // toolbar. Clamping those frames would shrink the real PTY to its minimum.
+    if (!dimensions || !Number.isFinite(dimensions.cols) || !Number.isFinite(dimensions.rows)
+      || terminalHost.clientWidth <= 0 || terminalHost.clientHeight <= 0) return;
+
+    const { cols, rows } = normalizeTerminalSize(dimensions.cols, dimensions.rows);
+    if (terminal.cols !== cols || terminal.rows !== rows) {
       terminal.resize(cols, rows);
     }
     sendResize();
@@ -288,30 +302,38 @@ function fitTerminalNow() {
   }
 }
 
+function fitTerminalNow() {
+  terminalFitScheduler.flush();
+}
+
 function fitTerminal() {
-  requestAnimationFrame(fitTerminalNow);
+  terminalFitScheduler.request();
+}
+
+function scheduleViewportFit() {
+  // Keep the visible container responsive, but do not send every intermediate
+  // keyboard animation size to the shell and make its TUI redraw repeatedly.
+  terminalFitScheduler.request(window.matchMedia('(pointer: coarse)').matches ? terminalViewportSettleMs : 0);
 }
 
 function scheduleTerminalFit() {
-  fitTerminal();
-  window.setTimeout(fitTerminalNow, 80);
-  window.setTimeout(fitTerminalNow, terminalKeyboardTransitionMs + 30);
-  window.setTimeout(fitTerminalNow, terminalKeyboardTransitionMs + 180);
+  terminalFitScheduler.request(terminalKeyboardTransitionMs + 32);
 }
 
 function handleSystemOrientationChange() {
   syncViewportSize(true);
   scheduleTerminalFit();
-  window.setTimeout(() => syncViewportSize(true), 250);
-  window.setTimeout(() => syncViewportSize(true), 600);
 }
 
-function getViewportMetrics(): ViewportMetrics {
+function getViewportMetrics(): ViewportMetrics | null {
   const viewport = window.visualViewport;
+  const width = viewport ? viewport.width : window.innerWidth;
+  const height = viewport ? viewport.height : window.innerHeight;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
   return {
     top: Math.max(0, Math.floor(viewport ? viewport.offsetTop : 0)),
-    width: Math.max(1, Math.ceil(viewport ? viewport.width : window.innerWidth)),
-    height: Math.max(1, Math.ceil(viewport ? viewport.height : window.innerHeight))
+    width: Math.ceil(width),
+    height: Math.ceil(height)
   };
 }
 
@@ -367,7 +389,6 @@ function handleTerminalTouchEnd(event: TouchEvent) {
 
   if (terminalTouchTap?.moved) {
     terminalSuppressMouseFocusUntil = Date.now() + terminalTouchScrollSuppressMouseMs;
-    terminal.blur();
   } else if (terminalTouchTap) {
     terminalSuppressMouseFocusUntil = 0;
     terminal.focus();
@@ -379,7 +400,6 @@ function handleTerminalTouchEnd(event: TouchEvent) {
 function handleTerminalTouchCancel() {
   if (terminalTouchTap?.moved) {
     terminalSuppressMouseFocusUntil = Date.now() + terminalTouchScrollSuppressMouseMs;
-    terminal.blur();
   }
   terminalTouchTap = null;
 }
@@ -392,7 +412,6 @@ function suppressTerminalMouseFocusAfterTouchScroll(event: Event) {
   if ('stopImmediatePropagation' in event) {
     event.stopImmediatePropagation();
   }
-  terminal.blur();
 }
 
 function bindTerminalViewportTouchScroll() {
@@ -425,6 +444,7 @@ function syncViewportSize(forceFit = false) {
     pendingViewportForceFit = false;
 
     const metrics = getViewportMetrics();
+    if (!metrics) return;
     const previous = lastViewportMetrics;
     const sizeChanged = !previous
       || viewportMetricChanged(previous.width, metrics.width)
@@ -445,7 +465,7 @@ function syncViewportSize(forceFit = false) {
 
     if (!sizeChanged && !shouldForceFit) return;
 
-    fitTerminalNow();
+    scheduleViewportFit();
   });
 }
 
@@ -757,7 +777,6 @@ function sendInput(data: string) {
   if (hadModifier) updateModifierButtons();
 
   socket.send(JSON.stringify({ type: 'input', data: modifiedData }));
-  terminal.focus();
 }
 
 function isEscapeKey(event: KeyboardEvent) {
@@ -1052,7 +1071,7 @@ function connectSession(session: TerminalSession, force = false, options: { clea
     window.setTimeout(() => {
       if (socket === connection) fitTerminalNow();
     }, 400);
-    terminal.focus();
+    if (!window.matchMedia('(pointer: coarse)').matches) terminal.focus();
     refreshSessions();
   });
 
@@ -1276,7 +1295,7 @@ terminalFrame.addEventListener('transitionend', (event) => {
 });
 
 if ('ResizeObserver' in window) {
-  const terminalResizeObserver = new ResizeObserver(() => fitTerminal());
+  const terminalResizeObserver = new ResizeObserver(() => scheduleViewportFit());
   terminalResizeObserver.observe(terminalHost);
 }
 
@@ -1407,19 +1426,23 @@ keyboard.addEventListener('click', (event) => {
     shiftActive = false;
     updateModifierButtons();
     terminal.scrollToBottom();
-    terminal.focus();
     return;
   }
 
-  if (key && keyMap[key]) sendInput(keyMap[key]);
+  if (key && keyMap[key]) {
+    sendInput(keyMap[key]);
+    terminal.focus();
+  }
 });
 
 window.addEventListener('resize', () => {
   syncViewportSize();
+  scheduleViewportFit();
 });
 screen.orientation?.addEventListener('change', handleSystemOrientationChange);
 window.visualViewport?.addEventListener('resize', () => {
   syncViewportSize();
+  scheduleViewportFit();
 });
 window.visualViewport?.addEventListener('scroll', () => {
   syncViewportSize();
@@ -1460,6 +1483,7 @@ connectionHealthTimer = window.setInterval(() => {
 }, 15_000);
 
 window.addEventListener('beforeunload', () => {
+  terminalFitScheduler.dispose();
   window.clearInterval(sessionRefreshTimer);
   window.clearInterval(connectionHealthTimer);
   discardPendingTerminalOutput();
