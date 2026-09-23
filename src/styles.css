@@ -344,7 +344,7 @@ button {
   z-index: 30;
   display: grid;
   width: min(380px, 90vw);
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   border-right: 1px solid var(--border-subtle);
   background: var(--surface);
   box-shadow: none;
