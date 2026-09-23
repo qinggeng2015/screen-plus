@@ -3,6 +3,10 @@ import { Terminal } from '@xterm/xterm';
 import { normalizeTerminalSize } from './terminal-size';
 import { writeTerminal } from './terminal-write';
 import { createTerminalFitScheduler } from './terminal-fit';
+import { createTerminalTouchScroller, type TerminalTouchPoint } from './terminal-touch';
+import { createTerminalTouchIntent } from './terminal-touch-intent';
+import { createTerminalScrollHandler } from './terminal-scroll';
+import { bindTerminalInputGuard } from './terminal-input-guard';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 
@@ -41,12 +45,6 @@ type ViewportMetrics = {
   top: number;
   width: number;
   height: number;
-};
-
-type TerminalTouchTap = {
-  startX: number;
-  startY: number;
-  moved: boolean;
 };
 
 function normalizeBasePath(value: string | undefined) {
@@ -239,8 +237,6 @@ const fabSize = 58;
 const fabGap = 18;
 const socketHeartbeatTimeoutMs = 30_000;
 const viewportMetricTolerance = 1;
-const terminalTapMoveTolerance = 8;
-const terminalTouchScrollSuppressMouseMs = 700;
 const terminalKeyboardTransitionMs = 180;
 const terminalViewportSettleMs = 160;
 let socket: WebSocket | null = null;
@@ -271,9 +267,6 @@ let terminalOutputTimer = 0;
 let pendingTerminalOutput: Array<string | Uint8Array> = [];
 let pendingTerminalOutputBytes = 0;
 let terminalRestore: { connection: WebSocket; replayingSnapshot: boolean } | null = null;
-let terminalViewport: HTMLElement | null = null;
-let terminalTouchTap: TerminalTouchTap | null = null;
-let terminalSuppressMouseFocusUntil = 0;
 
 const terminalFitScheduler = createTerminalFitScheduler(applyTerminalFit, {
   requestFrame: callback => window.requestAnimationFrame(callback),
@@ -281,6 +274,33 @@ const terminalFitScheduler = createTerminalFitScheduler(applyTerminalFit, {
   setTimer: (callback, delay) => window.setTimeout(callback, delay),
   clearTimer: id => window.clearTimeout(id)
 });
+
+const terminalScroll = createTerminalScrollHandler(terminal, (lines, x, y) => {
+  // Keep alternate-screen applications and mouse-aware TUIs on xterm's wheel
+  // protocol path. Each wheel event represents one line for those handlers.
+  for (let line = 0; line < Math.abs(lines); line++) {
+    terminal.element?.dispatchEvent(new WheelEvent('wheel', {
+      deltaY: Math.sign(lines), deltaMode: WheelEvent.DOM_DELTA_LINE,
+      clientX: x, clientY: y, bubbles: true, cancelable: true
+    }));
+  }
+});
+const terminalTouchScroller = createTerminalTouchScroller({
+  onScroll: (deltaY, x, y) => terminalScroll.scroll(deltaY, x, y),
+  onStart: () => terminalScroll.reset(),
+  now: () => performance.now(),
+  requestFrame: callback => window.requestAnimationFrame(callback),
+  cancelFrame: id => window.cancelAnimationFrame(id)
+});
+const terminalTouchIntent = createTerminalTouchIntent(() => performance.now());
+// Register the source guard before touch handlers consume the raw gestures.
+const terminalInputGuard = bindTerminalInputGuard(terminalHost);
+
+function cancelTerminalTouchScroll() {
+  terminalTouchScroller.cancel();
+  terminalTouchIntent.cancel();
+  terminalScroll.reset();
+}
 
 function applyTerminalFit() {
   // Restore both the snapshot and already-received output at their original size.
@@ -294,6 +314,7 @@ function applyTerminalFit() {
 
     const { cols, rows } = normalizeTerminalSize(dimensions.cols, dimensions.rows);
     if (terminal.cols !== cols || terminal.rows !== rows) {
+      cancelTerminalTouchScroll();
       terminal.resize(cols, rows);
     }
     sendResize();
@@ -341,91 +362,81 @@ function viewportMetricChanged(previous: number, next: number) {
   return Math.abs(previous - next) > viewportMetricTolerance;
 }
 
-function markTerminalTouchMoved() {
-  if (terminalTouchTap) {
-    terminalTouchTap.moved = true;
-  }
-  terminalSuppressMouseFocusUntil = Date.now() + terminalTouchScrollSuppressMouseMs;
+function terminalTouchPoint(touch: Touch): TerminalTouchPoint {
+  return { id: touch.identifier, x: touch.clientX, y: touch.clientY };
 }
 
-function updateTerminalTouchMovement(clientX: number, clientY: number) {
-  if (!terminalTouchTap) return;
-
-  const deltaX = Math.abs(clientX - terminalTouchTap.startX);
-  const deltaY = Math.abs(clientY - terminalTouchTap.startY);
-  if (deltaX > terminalTapMoveTolerance || deltaY > terminalTapMoveTolerance) {
-    markTerminalTouchMoved();
+function consumeTerminalTouch(event: TouchEvent) {
+  // xterm's document-level touch handler also adds inertia. Only one handler
+  // may own this gesture, or the same movement will be applied twice.
+  if (event.cancelable) event.preventDefault();
+  event.stopImmediatePropagation();
+  // xterm already owns scrollbar dragging through PointerEvent. Do not also
+  // turn that drag into content scrolling or a tap that opens the keyboard.
+  if (event.target instanceof Element && event.target.closest('.xterm-scrollbar')) {
+    cancelTerminalTouchScroll();
+    return false;
   }
+  return true;
 }
 
 function handleTerminalTouchStart(event: TouchEvent) {
+  if (!consumeTerminalTouch(event)) return;
   const touch = event.touches[0];
-  if (!touch || event.touches.length > 1) {
-    terminalTouchTap = null;
+  if (event.touches.length !== 1 || !touch) {
+    cancelTerminalTouchScroll();
     return;
   }
-
-  terminalTouchTap = {
-    startX: touch.clientX,
-    startY: touch.clientY,
-    moved: false
-  };
+  const point = terminalTouchPoint(touch);
+  terminalTouchIntent.start(point, terminalTouchScroller.isAnimating());
+  terminalTouchScroller.start(point);
 }
 
 function handleTerminalTouchMove(event: TouchEvent) {
-  if (!terminalTouchTap) return;
-
+  if (!consumeTerminalTouch(event)) return;
   const touch = event.touches[0];
-  if (!touch) return;
-
-  updateTerminalTouchMovement(touch.clientX, touch.clientY);
+  if (event.touches.length !== 1 || !touch) {
+    cancelTerminalTouchScroll();
+    return;
+  }
+  const point = terminalTouchPoint(touch);
+  terminalTouchIntent.move(point);
+  terminalTouchScroller.move(point);
 }
 
 function handleTerminalTouchEnd(event: TouchEvent) {
+  if (!consumeTerminalTouch(event)) return;
   const touch = event.changedTouches[0];
-  if (touch) {
-    updateTerminalTouchMovement(touch.clientX, touch.clientY);
+  if (event.touches.length || event.changedTouches.length !== 1 || !touch) {
+    cancelTerminalTouchScroll();
+    return;
   }
-
-  if (terminalTouchTap?.moved) {
-    terminalSuppressMouseFocusUntil = Date.now() + terminalTouchScrollSuppressMouseMs;
-  } else if (terminalTouchTap) {
-    terminalSuppressMouseFocusUntil = 0;
+  const point = terminalTouchPoint(touch);
+  if (terminalTouchIntent.end(point)) {
+    cancelTerminalTouchScroll();
     terminal.focus();
+  } else {
+    terminalTouchScroller.end(point);
   }
-
-  terminalTouchTap = null;
 }
 
-function handleTerminalTouchCancel() {
-  if (terminalTouchTap?.moved) {
-    terminalSuppressMouseFocusUntil = Date.now() + terminalTouchScrollSuppressMouseMs;
-  }
-  terminalTouchTap = null;
-}
-
-function suppressTerminalMouseFocusAfterTouchScroll(event: Event) {
-  if (Date.now() > terminalSuppressMouseFocusUntil) return;
-
-  event.preventDefault();
-  event.stopPropagation();
-  if ('stopImmediatePropagation' in event) {
-    event.stopImmediatePropagation();
-  }
+function handleTerminalTouchCancel(event: TouchEvent) {
+  consumeTerminalTouch(event);
+  cancelTerminalTouchScroll();
 }
 
 function bindTerminalViewportTouchScroll() {
-  terminalViewport = terminalHost.querySelector<HTMLElement>('.xterm-scrollable-element, .xterm-viewport');
-
-  terminalHost.addEventListener('touchstart', handleTerminalTouchStart, { passive: true, capture: true });
-  terminalHost.addEventListener('touchmove', handleTerminalTouchMove, { passive: true, capture: true });
-  terminalHost.addEventListener('touchend', handleTerminalTouchEnd, { passive: true, capture: true });
-  terminalHost.addEventListener('touchcancel', handleTerminalTouchCancel, { passive: true, capture: true });
-
-  // Android Chrome may synthesize mouse events after touch scrolling; prevent those
-  // from focusing xterm's hidden textarea and opening the system keyboard.
-  terminalHost.addEventListener('mousedown', suppressTerminalMouseFocusAfterTouchScroll, { capture: true });
-  terminalHost.addEventListener('click', suppressTerminalMouseFocusAfterTouchScroll, { capture: true });
+  terminalHost.addEventListener('touchstart', handleTerminalTouchStart, { passive: false, capture: true });
+  terminalHost.addEventListener('touchmove', handleTerminalTouchMove, { passive: false, capture: true });
+  terminalHost.addEventListener('touchend', handleTerminalTouchEnd, { passive: false, capture: true });
+  terminalHost.addEventListener('touchcancel', handleTerminalTouchCancel, { passive: false, capture: true });
+  terminalHost.addEventListener('pointerdown', event => {
+    const source = (event as PointerEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } }).sourceCapabilities;
+    if (event.pointerType === 'mouse' && source?.firesTouchEvents !== true) cancelTerminalTouchScroll();
+  }, { capture: true });
+  terminalHost.addEventListener('wheel', event => {
+    if (event.isTrusted) cancelTerminalTouchScroll();
+  }, { capture: true, passive: true });
 }
 
 function resetTerminalView() {
@@ -959,6 +970,7 @@ function ensureActiveConnection(reason = 'resume') {
 }
 
 function connectSession(session: TerminalSession, force = false, options: { clear?: boolean } = {}) {
+  cancelTerminalTouchScroll();
   const preserveTerminalOutput = options.clear === false && activeSession?.id === session.id;
   if (preserveTerminalOutput) {
     flushTerminalOutput();
@@ -1285,6 +1297,7 @@ function restoreFabPosition() {
 
 terminal.onData((data) => sendInput(data));
 terminal.onResize(sendResize);
+terminal.buffer.onBufferChange(cancelTerminalTouchScroll);
 
 bindTerminalViewportTouchScroll();
 
@@ -1421,6 +1434,7 @@ keyboard.addEventListener('click', (event) => {
   }
 
   if (key === 'bottom') {
+    cancelTerminalTouchScroll();
     ctrlActive = false;
     altActive = false;
     shiftActive = false;
@@ -1453,6 +1467,7 @@ document.addEventListener('visibilitychange', () => {
     syncViewportSize();
     ensureActiveConnection('resume');
   } else {
+    cancelTerminalTouchScroll();
     clearSocketHeartbeat(socket || undefined);
   }
 });
@@ -1483,6 +1498,8 @@ connectionHealthTimer = window.setInterval(() => {
 }, 15_000);
 
 window.addEventListener('beforeunload', () => {
+  terminalTouchScroller.dispose();
+  terminalInputGuard.dispose();
   terminalFitScheduler.dispose();
   window.clearInterval(sessionRefreshTimer);
   window.clearInterval(connectionHealthTimer);

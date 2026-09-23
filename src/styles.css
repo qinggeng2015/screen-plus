@@ -84,32 +84,30 @@ button {
   inset: 0 0 -1px 0;
   overflow: hidden;
   background: var(--terminal-band);
+  touch-action: none;
 }
 
 .terminal-host .xterm {
   height: 100%;
   padding: 0;
   background: var(--terminal-band);
-  touch-action: pan-y;
 }
 
 .terminal-host .xterm-scrollable-element {
-  min-height: calc(100% + 1px);
   background: var(--terminal-band);
   overscroll-behavior: contain;
-  touch-action: pan-y;
 }
 
 .terminal-host .xterm-viewport {
   background: var(--terminal-band);
   overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  touch-action: pan-y;
 }
 
-.terminal-host .xterm-screen {
-  min-height: calc(100% + 1px);
-  touch-action: pan-y;
+@media (any-pointer: coarse) {
+  .terminal-host .xterm-helper-textarea {
+    /* The invisible IME anchor must not intercept a scrolling finger. */
+    pointer-events: none;
+  }
 }
 
 .session-chip {
