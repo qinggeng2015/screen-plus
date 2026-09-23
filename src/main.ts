@@ -1,6 +1,7 @@
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import { normalizeTerminalSize } from './terminal-size';
+import { writeTerminal } from './terminal-write';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 
@@ -34,8 +35,6 @@ type AuthStatusResponse = {
   setupRequired: boolean;
   username: string | null;
 };
-
-type ThemeMode = 'dark' | 'light';
 
 type ViewportMetrics = {
   top: number;
@@ -98,7 +97,7 @@ const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('Missing app element');
 
 app.innerHTML = `
-  <main class="app-shell" data-menu-open="false" data-drawer-open="false" data-keyboard-open="false" data-theme="dark">
+  <main class="app-shell" data-menu-open="false" data-drawer-open="false" data-keyboard-open="false">
     <section class="terminal-frame" aria-label="远程终端">
       <div class="session-chip" id="sessionChip">正在连接...</div>
       <div class="terminal-host" id="terminalHost"></div>
@@ -147,10 +146,6 @@ app.innerHTML = `
         <span class="quick-action-icon">⌨</span>
         <span>键盘</span>
       </button>
-      <button class="quick-action" id="toggleTheme" type="button" aria-pressed="false">
-        <span class="quick-action-icon" id="themeIcon">☀</span>
-        <span id="themeLabel">白天</span>
-      </button>
     </nav>
 
     <button class="fab" id="fab" type="button" aria-label="打开快速操作" aria-expanded="false">
@@ -185,11 +180,6 @@ const fab = document.querySelector<HTMLButtonElement>('#fab')!;
 const quickMenu = document.querySelector<HTMLElement>('#quickMenu')!;
 const keyboard = document.querySelector<HTMLElement>('#terminalKeyboard')!;
 const scrim = document.querySelector<HTMLElement>('#scrim')!;
-const themeIcon = document.querySelector<HTMLSpanElement>('#themeIcon')!;
-const themeLabel = document.querySelector<HTMLSpanElement>('#themeLabel')!;
-const themeToggle = document.querySelector<HTMLButtonElement>('#toggleTheme')!;
-const themeColorMeta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
-const appleStatusBarMeta = document.querySelector<HTMLMetaElement>('meta[name="apple-mobile-web-app-status-bar-style"]');
 const authGate = document.querySelector<HTMLElement>('#authGate')!;
 const authForm = document.querySelector<HTMLFormElement>('#authForm')!;
 const authTitle = document.querySelector<HTMLHeadingElement>('#authTitle')!;
@@ -198,57 +188,28 @@ const authPassword = document.querySelector<HTMLInputElement>('#authPassword')!;
 const authSubmit = document.querySelector<HTMLButtonElement>('#authSubmit')!;
 const authMessage = document.querySelector<HTMLParagraphElement>('#authMessage')!;
 
-const terminalThemes = {
-  dark: {
-    background: '#06080a',
-    foreground: '#d7e1df',
-    cursor: '#f0f7f4',
-    selectionBackground: '#2b6158',
-    black: '#07100f',
-    red: '#d65d63',
-    green: '#73c991',
-    yellow: '#d7ba7d',
-    blue: '#6ca8dc',
-    magenta: '#c586c0',
-    cyan: '#4ec9b0',
-    white: '#d4d4d4',
-    brightBlack: '#5a6664',
-    brightRed: '#f48771',
-    brightGreen: '#89d185',
-    brightYellow: '#ffd866',
-    brightBlue: '#82aaff',
-    brightMagenta: '#d670d6',
-    brightCyan: '#64d9c4',
-    brightWhite: '#ffffff'
-  },
-  light: {
-    background: '#ffffff',
-    foreground: '#17211f',
-    cursor: '#0f1a18',
-    selectionBackground: '#b7ddd4',
-    black: '#17211f',
-    red: '#b93d45',
-    green: '#227a4f',
-    yellow: '#9a6a00',
-    blue: '#2266a8',
-    magenta: '#9a4b99',
-    cyan: '#147d73',
-    white: '#e9efed',
-    brightBlack: '#66736f',
-    brightRed: '#d2525b',
-    brightGreen: '#2f965f',
-    brightYellow: '#bd8100',
-    brightBlue: '#2f7fcf',
-    brightMagenta: '#b05caf',
-    brightCyan: '#15968a',
-    brightWhite: '#ffffff'
-  }
+const terminalTheme = {
+  background: '#ffffff',
+  foreground: '#17211f',
+  cursor: '#0f1a18',
+  selectionBackground: '#b7ddd4',
+  black: '#17211f',
+  red: '#b93d45',
+  green: '#227a4f',
+  yellow: '#9a6a00',
+  blue: '#2266a8',
+  magenta: '#9a4b99',
+  cyan: '#147d73',
+  white: '#e9efed',
+  brightBlack: '#66736f',
+  brightRed: '#d2525b',
+  brightGreen: '#2f965f',
+  brightYellow: '#bd8100',
+  brightBlue: '#2f7fcf',
+  brightMagenta: '#b05caf',
+  brightCyan: '#15968a',
+  brightWhite: '#ffffff'
 } as const;
-
-const appThemeColors: Record<ThemeMode, string> = {
-  dark: '#ffffff',
-  light: '#ffffff'
-};
 
 const terminal = new Terminal({
   ...normalizeTerminalSize(),
@@ -265,7 +226,7 @@ const terminal = new Terminal({
   scrollbar: {
     width: 12
   },
-  theme: terminalThemes.dark
+  theme: terminalTheme
 });
 
 const fitAddon = new FitAddon();
@@ -273,7 +234,6 @@ terminal.loadAddon(fitAddon);
 terminal.open(terminalHost);
 
 const fabPositionStorageKey = 'screen-plus:floating-button-position';
-const themeStorageKey = 'screen-plus:theme';
 const fabSize = 58;
 const fabGap = 18;
 const socketHeartbeatTimeoutMs = 30_000;
@@ -312,30 +272,6 @@ let terminalRestore: { connection: WebSocket; replayingSnapshot: boolean } | nul
 let terminalViewport: HTMLElement | null = null;
 let terminalTouchTap: TerminalTouchTap | null = null;
 let terminalSuppressMouseFocusUntil = 0;
-
-function readStoredTheme(): ThemeMode {
-  const saved = localStorage.getItem(themeStorageKey);
-  if (saved === 'light' || saved === 'dark') return saved;
-
-  return 'dark';
-}
-
-function applyTheme(mode: ThemeMode, persist = true) {
-  shell.dataset.theme = mode;
-  terminal.options.theme = terminalThemes[mode];
-  document.documentElement.style.colorScheme = mode;
-  document.documentElement.style.backgroundColor = terminalThemes[mode].background;
-  document.body.style.backgroundColor = terminalThemes[mode].background;
-  themeColorMeta?.setAttribute('content', appThemeColors[mode]);
-  appleStatusBarMeta?.setAttribute('content', 'default');
-  themeToggle.setAttribute('aria-pressed', String(mode === 'light'));
-  themeIcon.textContent = mode === 'light' ? '☾' : '☀';
-  themeLabel.textContent = mode === 'light' ? '暗夜' : '白天';
-
-  if (persist) {
-    localStorage.setItem(themeStorageKey, mode);
-  }
-}
 
 function fitTerminalNow() {
   // Restore both the snapshot and already-received output at their original size.
@@ -1065,7 +1001,7 @@ function connectSession(session: TerminalSession, force = false, options: { clea
     restoringOutputBytes = 0;
     if (output.length) {
       for (const chunk of output) terminal.write(chunk);
-      terminal.write('', finishSnapshotRestore);
+      writeTerminal(terminal, '', finishSnapshotRestore);
       return;
     }
     terminalRestore = null;
@@ -1091,12 +1027,12 @@ function connectSession(session: TerminalSession, force = false, options: { clea
     const size = normalizeTerminalSize(payload.cols, payload.rows);
     // A reset alone cannot cancel xterm's async write queue. Drain old writes
     // before clearing so a previous connection cannot reappear after replay.
-    terminal.write('', () => {
+    writeTerminal(terminal, '', () => {
       if (socket !== connection || terminalRestore !== restore) return;
       terminal.reset();
       terminal.clear();
       terminal.resize(size.cols, size.rows);
-      terminal.write(snapshot, () => {
+      writeTerminal(terminal, snapshot, () => {
         if (socket !== connection || terminalRestore !== restore) return;
         restore.replayingSnapshot = false;
         finishSnapshotRestore();
@@ -1421,12 +1357,6 @@ document.querySelector('#toggleKeyboard')?.addEventListener('click', () => {
   setKeyboardOpen(shell.dataset.keyboardOpen !== 'true');
 });
 
-themeToggle.addEventListener('click', () => {
-  const nextMode: ThemeMode = shell.dataset.theme === 'light' ? 'dark' : 'light';
-  setMenuOpen(false);
-  applyTheme(nextMode);
-});
-
 document.querySelector('#closeDrawer')?.addEventListener('click', () => setDrawerOpen(false));
 document.querySelector('#refreshSessions')?.addEventListener('click', refreshSessions);
 document.querySelector('#newSession')?.addEventListener('click', () => createNewSession());
@@ -1536,7 +1466,6 @@ window.addEventListener('beforeunload', () => {
   socket?.close();
 });
 
-applyTheme(readStoredTheme(), false);
 registerServiceWorker();
 syncViewportSize();
 loadAuthStatus().catch((error) => {
