@@ -1,5 +1,6 @@
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
+import { normalizeTerminalSize } from './terminal-size';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 
@@ -250,6 +251,7 @@ const appThemeColors: Record<ThemeMode, string> = {
 };
 
 const terminal = new Terminal({
+  ...normalizeTerminalSize(),
   cursorBlink: true,
   convertEol: false,
   fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
@@ -258,7 +260,8 @@ const terminal = new Terminal({
   scrollback: 10000,
   scrollSensitivity: 1,
   fastScrollSensitivity: 5,
-  smoothScrollDuration: 80,
+  // Keep the TUI composer anchored while output changes the scroll position.
+  smoothScrollDuration: 0,
   scrollbar: {
     width: 12
   },
@@ -334,7 +337,11 @@ function applyTheme(mode: ThemeMode, persist = true) {
 
 function fitTerminalNow() {
   try {
-    fitAddon.fit();
+    const dimensions = fitAddon.proposeDimensions();
+    if (dimensions) {
+      const { cols, rows } = normalizeTerminalSize(dimensions.cols, dimensions.rows);
+      terminal.resize(cols, rows);
+    }
     sendResize();
   } catch {
     // The terminal can briefly be hidden while the auth gate is settling.

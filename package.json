@@ -8,6 +8,7 @@
     "dev:server": "node server/index.cjs",
     "dev:client": "vite --host 0.0.0.0",
     "build": "vite build",
+    "test": "node --test tests/*.test.cjs",
     "start": "node server/index.cjs"
   },
   "dependencies": {

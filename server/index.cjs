@@ -7,6 +7,8 @@ const { execFile } = require('node:child_process');
 const express = require('express');
 const pty = require('node-pty');
 const { WebSocketServer } = require('ws');
+const { createTerminalOutput } = require('./terminal-output.cjs');
+const { normalizeTerminalSize } = require('./terminal-size.cjs');
 
 function isUtf8Locale(value) {
   return /utf-?8/i.test(String(value || ''));
@@ -240,13 +242,6 @@ function terminalEnv() {
     LANG: UTF8_LOCALE,
     LC_CTYPE: UTF8_LOCALE,
     TERM: 'xterm-256color'
-  };
-}
-
-function normalizeTerminalSize(cols, rows) {
-  return {
-    cols: Math.max(20, Math.min(300, Number(cols) || 120)),
-    rows: Math.max(6, Math.min(120, Number(rows) || 32))
   };
 }
 
@@ -679,8 +674,7 @@ async function createSession(name, sizeInput = null) {
 }
 
 async function resizeSessionWindow(value, cols, rows) {
-  const nextCols = Math.max(20, Math.min(300, Number(cols) || 120));
-  const nextRows = Math.max(6, Math.min(120, Number(rows) || 32));
+  const { cols: nextCols, rows: nextRows } = normalizeTerminalSize(cols, rows);
 
   try {
     await execScreen(['-S', value, '-X', 'height', '-w', String(nextRows), String(nextCols)]);
@@ -999,6 +993,11 @@ wss.on('connection', async (ws, _request, url) => {
   }
 
   let term;
+  const output = createTerminalOutput({
+    send(data) {
+      if (ws.readyState === ws.OPEN) ws.send(data);
+    }
+  });
   const pendingMessages = [];
   const queueMessage = (data) => {
     if (pendingMessages.length < 256) pendingMessages.push(data);
@@ -1070,6 +1069,7 @@ wss.on('connection', async (ws, _request, url) => {
 
   ws.on('message', handleMessage);
   ws.on('close', () => {
+    output.dispose();
     try {
       if (term) term.kill();
     } catch {
@@ -1111,11 +1111,12 @@ wss.on('connection', async (ws, _request, url) => {
     });
 
     term.onData((data) => {
-      if (ws.readyState === ws.OPEN) ws.send(data);
+      output.push(data);
     });
 
     term.onExit(({ exitCode, signal }) => {
       if (ws.readyState === ws.OPEN) {
+        output.flush();
         ws.send(`\r\nscreen-plus: screen exited (${signal || exitCode})\r\n`);
         ws.close();
       }
