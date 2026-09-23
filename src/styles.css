@@ -398,6 +398,21 @@ button {
   padding: 14px 16px;
 }
 
+.direct-session-action {
+  padding: 0 16px 14px;
+}
+
+.direct-session-action button {
+  width: 100%;
+}
+
+.direct-session-action p {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .primary-action,
 .ghost-action {
   height: 38px;

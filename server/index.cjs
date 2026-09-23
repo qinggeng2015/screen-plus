@@ -9,6 +9,7 @@ const pty = require('node-pty');
 const { WebSocketServer } = require('ws');
 const { createTerminalOutput } = require('./terminal-output.cjs');
 const { normalizeTerminalSize } = require('./terminal-size.cjs');
+const { createDirectSessions } = require('./direct-sessions.cjs');
 
 function isUtf8Locale(value) {
   return /utf-?8/i.test(String(value || ''));
@@ -52,6 +53,13 @@ const UTF8_LOCALE = process.env.SCREEN_PLUS_LOCALE
   || usableUtf8Locale(process.env.LC_ALL)
   || 'C.UTF-8';
 const SHELL_HOME = process.env.SCREEN_PLUS_HOME || process.env.HOME || os.homedir() || process.cwd();
+const directSessions = createDirectSessions({
+  spawn: pty.spawn,
+  shell: SCREEN_SHELL || process.env.SHELL || '/bin/sh',
+  cwd: SHELL_HOME,
+  env: terminalEnv(),
+  onExit(session) { forgetSession(session.id); }
+});
 
 const app = express();
 app.use(stripBasePath);
@@ -639,7 +647,11 @@ function removeDeadScreenSession(session) {
 }
 
 async function listSessions() {
-  return readScreenSessions();
+  return [...await readScreenSessions(), ...directSessions.list()];
+}
+
+function resolveDirectSession(value) {
+  return directSessions.get(value) || directSessions.list().find((session) => session.name === value);
 }
 
 function validateSessionName(sessionName) {
@@ -674,6 +686,8 @@ async function createSession(name, sizeInput = null) {
 }
 
 async function resizeSessionWindow(value, cols, rows) {
+  // Direct sessions resize through their one attached PTY only.
+  if (directSessions.get(value)) return;
   const { cols: nextCols, rows: nextRows } = normalizeTerminalSize(cols, rows);
 
   try {
@@ -696,6 +710,13 @@ function isExplicitlyDetachedSession(session) {
 }
 
 async function closeSession(value) {
+  const direct = resolveDirectSession(value);
+  if (direct) {
+    await directSessions.close(direct.id);
+    rememberRemovedSession(direct);
+    forgetSession(direct.id);
+    return direct;
+  }
   const sessions = await readScreenSessions();
   const session = resolveSession(sessions, value);
 
@@ -768,6 +789,10 @@ async function renameSession(value, nextName) {
     throw error;
   }
 
+  if (session.backend === 'direct') {
+    return directSessions.rename(session.id, nextName);
+  }
+
   const result = await execScreen(['-S', session.id, '-X', 'sessionname', nextName], { allowedExitCodes: [1] });
   if (result.code !== 0) {
     const output = `${result.stdout}\n${result.stderr}`.trim();
@@ -798,6 +823,9 @@ async function selectDefaultSession(sizeInput = null) {
   if (!sessions.length) return createSession(null, sizeInput);
 
   const last = lastSessionId ? resolveSession(sessions, lastSessionId) : null;
+  // A refresh can arrive before the old WebSocket has closed. A direct session
+  // is explicitly reattached by the client, rather than starting a new shell.
+  if (last?.backend === 'direct') return last;
   if (last && isExplicitlyDetachedSession(last)) {
     rememberSession(last.id);
     return last;
@@ -909,7 +937,25 @@ app.post('/api/sessions/default', async (req, res, next) => {
 
 app.post('/api/sessions', async (req, res, next) => {
   try {
-    const session = await createSession(req.body?.name, { cols: req.body?.cols, rows: req.body?.rows });
+    const backend = req.body?.backend || 'screen';
+    if (backend !== 'screen' && backend !== 'direct') {
+      res.status(400).json({ error: 'Unknown terminal backend.' });
+      return;
+    }
+    const size = normalizeTerminalSize(req.body?.cols, req.body?.rows);
+    let session;
+    if (backend === 'direct') {
+      const name = req.body?.name || `${SESSION_PREFIX}-direct-${crypto.randomBytes(4).toString('hex')}`;
+      validateSessionName(name);
+      if ((await listSessions()).some((item) => item.name === name)) {
+        res.status(409).json({ error: 'Session name already exists.' });
+        return;
+      }
+      session = directSessions.create(name, size);
+      rememberSession(session.id);
+    } else {
+      session = await createSession(req.body?.name, size);
+    }
     await resizeSessionWindow(session.id, req.body?.cols, req.body?.rows);
     res.status(201).json({ session });
   } catch (error) {
@@ -963,6 +1009,99 @@ app.use((error, _req, res, _next) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
+async function connectDirectTerminal(ws, sessionId, size, force) {
+  let attachment = null;
+  let closed = false;
+  const pendingInput = [];
+  let pendingBytes = 0;
+  let pendingSize = null;
+  const send = (data, binary = false) => {
+    if (closed || ws.readyState !== ws.OPEN) return;
+    if (ws.bufferedAmount > 4 * 1024 * 1024) {
+      ws.close(1013, 'Terminal connection is too slow');
+      return;
+    }
+    // Terminal bytes use binary frames so an application's printed JSON can
+    // never be mistaken for a snapshot or a heartbeat control message.
+    ws.send(binary ? Buffer.from(data) : data);
+  };
+
+  ws.on('close', () => {
+    closed = true;
+    pendingInput.length = 0;
+    attachment?.detach();
+  });
+  ws.on('message', (message) => {
+    if (closed) return;
+    let payload;
+    try {
+      payload = JSON.parse(message.toString());
+    } catch {
+      return;
+    }
+    if (!payload) return;
+    try {
+      if (payload.type === 'ping' && typeof payload.id === 'string') {
+        send(JSON.stringify({ type: 'pong', id: payload.id }));
+      } else if (payload.type === 'input' && typeof payload.data === 'string') {
+        if (attachment) {
+          attachment.write(payload.data);
+        } else {
+          pendingBytes += Buffer.byteLength(payload.data);
+          if (pendingBytes > 64 * 1024 || pendingInput.length >= 256) {
+            ws.close(1009, 'Too much input before terminal attachment');
+            return;
+          }
+          pendingInput.push(payload.data);
+        }
+      } else if (payload.type === 'resize') {
+        const next = normalizeTerminalSize(payload.cols, payload.rows);
+        if (attachment) {
+          attachment.resize(next.cols, next.rows).catch(() => {
+            if (ws.readyState === ws.OPEN) ws.close(1011, 'Terminal resize failed');
+          });
+        }
+        else pendingSize = next;
+      }
+    } catch {
+      ws.close(1011, 'Terminal operation failed');
+    }
+  });
+
+  try {
+    attachment = await directSessions.attach(sessionId, {
+      ...size,
+      force,
+      onSnapshot(snapshot) { send(JSON.stringify({ type: 'snapshot', ...snapshot })); },
+      onData(data) { send(data, true); },
+      onExit({ exitCode, signal }) {
+        send(`\r\nscreen-plus: terminal exited (${signal || exitCode})\r\n`, true);
+        ws.close(1000, 'Terminal exited');
+      },
+      onDetach(reason) {
+        closed = true;
+        if (ws.readyState === ws.OPEN) {
+          ws.close(reason === 'taken-over' ? 4001 : 1011,
+            reason === 'taken-over' ? 'Terminal opened in another page' : 'Terminal connection ended');
+        }
+      }
+    });
+    if (closed || ws.readyState !== ws.OPEN) {
+      attachment.detach();
+      return;
+    }
+    rememberSession(sessionId);
+    if (pendingSize) await attachment.resize(pendingSize.cols, pendingSize.rows);
+    if (closed || ws.readyState !== ws.OPEN) return;
+    for (const data of pendingInput.splice(0)) attachment.write(data);
+  } catch (error) {
+    if (!closed && ws.readyState === ws.OPEN) {
+      send(`\r\nscreen-plus: ${error.message}\r\n`, true);
+      ws.close(error.code === 'ATTACHED' || error.code === 'NOT_FOUND' ? 1008 : 1011, 'Terminal attachment failed');
+    }
+  }
+}
+
 server.on('upgrade', (request, socket, head) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
   if (stripBasePathname(url.pathname) !== '/term') {
@@ -989,6 +1128,11 @@ wss.on('connection', async (ws, _request, url) => {
   if (!requestedSession) {
     ws.send('\r\nscreen-plus: missing session id\r\n');
     ws.close(1008);
+    return;
+  }
+
+  if (requestedSession.startsWith('direct-')) {
+    await connectDirectTerminal(ws, requestedSession, { cols, rows }, force);
     return;
   }
 
@@ -1063,7 +1207,9 @@ wss.on('connection', async (ws, _request, url) => {
         closeOnTerminalError();
         return;
       }
-      resizeSessionWindow(requestedSession, nextCols, nextRows).catch(() => {});
+      // Screen observes this PTY's SIGWINCH. A parallel `screen -X height`
+      // can finish later and overwrite a newer size, leaving the app and xterm
+      // on different grids. The attached PTY is the sole resize authority.
     }
   };
 

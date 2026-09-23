@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.12.0-beta.287",
+    "@xterm/addon-serialize": "0.15.0-beta.287",
+    "@xterm/headless": "6.1.0-beta.287",
     "@xterm/xterm": "^6.1.0-beta.287",
     "express": "^4.19.2",
     "node-pty": "^1.0.0",

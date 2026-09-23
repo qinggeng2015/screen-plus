@@ -24,6 +24,16 @@ npm start
 
 运行 `npm test` 可验证真实 GNU Screen 4.9 合成输出的回放、分包控制指令及终端尺寸一致性。更新正在运行的 Docker 容器会终止其中的 Screen 会话和子进程，部署前应先保存工作。
 
+### Codex 等交互工具的直连终端
+
+会话列表中的「新建直连终端」会直接启动 shell，不经过 GNU Screen。进入后照常通过 SSH 连接远端，再运行 Codex。直连输出保留应用的原始同步刷新标记，不使用 Screen 路径的 32ms 合批，可以用于对照排查底部闪烁和提示重复问题；已有 Screen 会话不会自动转换。
+
+直连进程在浏览器断线、刷新或切换会话时继续运行。重新打开会话会恢复服务端保存的终端画面和最多 10000 行滚动历史；同一会话同时只由一个页面控制，接管后旧页面会显示断开提示。直连会话只在当前服务进程存活期间保留，重启服务或更新容器会结束这些会话。
+
+Screen 会话在连接期间只通过 PTY 的尺寸变化通知更新行列数，避免并行 `screen -X height` 的旧任务覆盖新尺寸。首次连接前仍会设置初始尺寸，并使用 `screen -A` 对齐。
+
+安装 GNU Screen 后，可运行 `node tests/integration/terminal-web.cjs` 验证 HTTP/WebSocket、直连恢复和 Screen 回归，或运行 `node tests/integration/screen-resize.cjs` 验证真实 PTY 的尺寸传播。两者均创建临时目录和独立会话，不连接已有会话。
+
 首次访问页面时需要设置用户名和密码。密码会以哈希形式保存到配置文件中，后续重启服务不需要重新设置。
 
 页面包含 Web App Manifest 和 Service Worker，可在 Android Chrome 中通过浏览器菜单安装到桌面，安装后会以独立窗口方式打开。Chrome 对完整 PWA 安装通常要求 HTTPS，`localhost` 例外；如果使用局域网 IP 访问，建议在前面加 HTTPS 反向代理，否则浏览器可能只显示“添加到主屏幕”。
